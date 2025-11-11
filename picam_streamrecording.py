@@ -11,7 +11,7 @@ Compatible with Pi Camera Module 3 and picamera2
 from flask import Flask, Response, render_template_string
 from picamera2 import Picamera2
 from picamera2.encoders import H264Encoder, MJPEGEncoder
-from picamera2.outputs import FileOutput, FfmpegOutput
+from picamera2.outputs import FileOutput
 import io
 import threading
 import time
@@ -93,7 +93,7 @@ def init_camera():
     
     print("\n✓ Camera initialized:")
     print(f"  - Recording: 1920x1080 @ 30fps (H.264, ~15Mbps) → storage")
-    print(f"  - Streaming: 1280x720 @ 15fps (MJPEG, ~5Mbps) → web")
+    print(f"  - Streaming: 1280x720 @ 15fps (MJPEG, ~10Mbps) → web")
     print(f"  - Using full 12MP sensor with hardware ISP downscaling")
 
 def start_recording():
@@ -118,18 +118,12 @@ def start_recording():
         iperiod=30         # I-frame every second (30fps)
     )
     
-    # Create network stream output (transcodes to 5Mbps @ 15fps)
-    network_output = FfmpegOutput(
-        "-f mpegts -vcodec copy -r 15 -b:v 5M udp://127.0.0.1:5000",
-        audio=False
-    )
-    
     # Create file output for local storage
     file_output = FileOutput(current_recording_file)
     
-    # CRITICAL: Single H.264 encoder with MULTIPLE outputs
-    # This uses the hardware encoder ONCE and sends to both destinations
-    h264_encoder.output = [file_output, network_output]
+    # Single H.264 encoder writing directly to file
+    # This uses the hardware encoder ONCE for maximum efficiency
+    h264_encoder.output = file_output
     
     # Start encoding on the MAIN stream (high resolution)
     camera.start_encoder(h264_encoder, name="main")
@@ -137,7 +131,6 @@ def start_recording():
     recording_active = True
     print(f"\n✓ Started recording to: {current_recording_file}")
     print(f"  - Local file: Full quality (15Mbps)")
-    print(f"  - Network stream: UDP port 5000 (5Mbps @ 15fps)")
 
 def stop_recording():
     """Stop H.264 recording"""
@@ -290,10 +283,9 @@ def index():
                             <li><strong>Codec:</strong> H.264 (hardware encoded)</li>
                             <li><strong>Bitrate:</strong> 15Mbps (high quality)</li>
                             <li><strong>Storage:</strong> Local H.264 files in recordings/</li>
-                            <li><strong>Network:</strong> UDP stream on port 5000 (5Mbps @ 15fps)</li>
                             <li><strong>Sensor:</strong> Full 12MP capture with ISP downscaling</li>
                         </ul>
-                        <p><em>Hardware: Single encoder, dual outputs (file + network)</em></p>
+                        <p><em>Hardware: Optimized for minimal CPU usage</em></p>
                     </div>
                 </div>
             </div>
@@ -334,7 +326,6 @@ if __name__ == '__main__':
         print("Camera system ready!")
         print("=" * 60)
         print(f"Web interface: http://<your-pi-ip>:8080")
-        print(f"UDP stream: udp://127.0.0.1:5000")
         print(f"Recording to: {current_recording_file}")
         print("Press Ctrl+C to stop")
         print("=" * 60 + "\n")
