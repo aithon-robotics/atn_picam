@@ -41,12 +41,6 @@ def init_camera():
     
     camera = Picamera2()
     
-    # List available sensor modes to see what's possible
-    sensor_modes = camera.sensor_modes
-    print("Available sensor modes:")
-    for i, mode in enumerate(sensor_modes):
-        print(f"  Mode {i}: {mode}")
-    
     # Configure for FULL 12MP sensor capture (4608x2592)
     # The ISP (Image Signal Processor) automatically downscales raw → main
     # This gives you the full field of view with hardware downscaling
@@ -60,31 +54,13 @@ def init_camera():
     
     camera.configure(config)
     
-    # Print actual configuration being used
-    actual_config = camera.camera_configuration()
-    print(f"\nConfigured sensor mode:")
-    print(f"  Raw stream:  {actual_config['raw']}")
-    print(f"  Main stream: {actual_config['main']}")
-    print(f"  Transform:   {actual_config.get('transform', 'none')}")
-    if 'sensor' in actual_config:
-        print(f"  Sensor:      {actual_config['sensor']}")
-    
-    # Calculate downscaling factor
-    raw_width = actual_config['raw']['size'][0]
-    raw_height = actual_config['raw']['size'][1]
-    main_width = actual_config['main']['size'][0]
-    main_height = actual_config['main']['size'][1]
-    scale_x = raw_width / main_width
-    scale_y = raw_height / main_height
-    print(f"\n  ISP Downscaling: {raw_width}x{raw_height} → {main_width}x{main_height}")
-    print(f"  Scale factor: {scale_x:.2f}x horizontally, {scale_y:.2f}x vertically")
-    
     output = StreamingOutput()
     
-    # Set controls for optimal performance
+    # Set controls including ScalerCrop BEFORE starting recording for faster startup
     camera.set_controls({
-        "FrameRate": 15.0,  # Lower FPS for full sensor readout on Pi Zero 2
-        "NoiseReductionMode": 0  # Disable for better performance
+        "FrameRate": 15.0,
+        "NoiseReductionMode": 0,
+        "ScalerCrop": (0, 0, 4608, 2592)  # Full sensor area - NO CROPPING
     })
     
     camera.start_recording(MJPEGEncoder(bitrate=10000000), FileOutput(output))
@@ -92,20 +68,13 @@ def init_camera():
     # CRITICAL: Set ScalerCrop to use the FULL sensor area after recording starts
     # Without this, the ISP may crop/zoom into a portion of the sensor
     # The coordinates are (x, y, width, height) relative to the raw stream size
-    time.sleep(0.5)  # Let the camera stabilize
+    time.sleep(0.1)  # Let the camera stabilize
     camera.set_controls({
         "ScalerCrop": (0, 0, 4608, 2592)  # Full sensor area - NO CROPPING
     })
-    
-    # Verify the ScalerCrop was applied
-    time.sleep(0.2)
-    metadata = camera.capture_metadata()
-    if 'ScalerCrop' in metadata:
-        crop = metadata['ScalerCrop']
-        print(f"  ScalerCrop applied: {crop}")
+
     
     print("\n✓ Camera streaming full 12MP sensor → ISP downscaled to 1280x720 @ 15fps")
-    print("  This gives you the complete field of view with hardware ISP downscaling")
 
 def monitor_network():
     """Monitor and print network statistics every 5 seconds"""
