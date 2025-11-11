@@ -13,6 +13,9 @@ import io
 import threading
 import time
 import psutil
+import cv2
+import numpy as np
+from collections import deque
 
 app = Flask(__name__)
 
@@ -24,6 +27,15 @@ active_clients = 0
 bytes_sent = 0
 start_time = time.time()
 
+# Video stabilization variables
+ENABLE_STABILIZATION = True
+SMOOTHING_RADIUS = 15  # Lower = more responsive, higher = smoother (was 30)
+STABILIZATION_STRENGTH = 0.3  # 0.0 to 1.0, lower = less aggressive
+CROP_PERCENT = 5  # Crop 5% from edges to hide border artifacts
+prev_gray = None
+transforms_buffer = deque(maxlen=SMOOTHING_RADIUS)
+stabilized_frame = None
+
 class StreamingOutput(io.BufferedIOBase):
     """Custom output class for streaming frames"""
     def __init__(self):
@@ -34,6 +46,117 @@ class StreamingOutput(io.BufferedIOBase):
         with self.condition:
             self.frame = buf
             self.condition.notify_all()
+
+def stabilize_frame(frame_jpeg):
+    """
+    Apply video stabilization using optical flow and motion smoothing.
+    Reduces vibrations by tracking motion between frames.
+    """
+    global prev_gray, transforms_buffer, ENABLE_STABILIZATION
+    
+    if not ENABLE_STABILIZATION:
+        return frame_jpeg
+    
+    try:
+        # Decode JPEG to numpy array
+        frame = cv2.imdecode(np.frombuffer(frame_jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if frame is None:
+            return frame_jpeg
+        
+        h, w = frame.shape[:2]
+        
+        # Convert to grayscale for motion detection
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        # Initialize on first frame
+        if prev_gray is None:
+            prev_gray = gray
+            return frame_jpeg
+        
+        # Detect feature points in previous frame (fewer points = faster)
+        prev_pts = cv2.goodFeaturesToTrack(prev_gray, maxCorners=100, qualityLevel=0.01,
+                                           minDistance=30, blockSize=3)
+        
+        if prev_pts is None:
+            prev_gray = gray
+            return frame_jpeg
+        
+        # Calculate optical flow (track points from previous to current frame)
+        curr_pts, status, err = cv2.calcOpticalFlowPyrLK(prev_gray, gray, prev_pts, None)
+        
+        # Filter only valid points
+        idx = np.where(status == 1)[0]
+        prev_pts = prev_pts[idx]
+        curr_pts = curr_pts[idx]
+        
+        if len(prev_pts) < 10:  # Need at least 10 points for reliable estimation
+            prev_gray = gray
+            return frame_jpeg
+        
+        # Estimate rigid transformation (translation + rotation only, no scale)
+        transform = cv2.estimateAffinePartial2D(prev_pts, curr_pts)[0]
+        
+        if transform is None:
+            prev_gray = gray
+            return frame_jpeg
+        
+        # Extract transformation parameters
+        dx = transform[0, 2]  # Translation X
+        dy = transform[1, 2]  # Translation Y
+        da = np.arctan2(transform[1, 0], transform[0, 0])  # Rotation angle
+        
+        # Store transformation
+        transforms_buffer.append([dx, dy, da])
+        
+        # Calculate smoothed transformation (moving average)
+        if len(transforms_buffer) >= 3:  # Need at least 3 frames
+            transforms_array = np.array(transforms_buffer)
+            
+            # Use weighted moving average (more recent frames have higher weight)
+            weights = np.linspace(0.5, 1.0, len(transforms_array))
+            weights = weights / weights.sum()
+            smoothed = np.average(transforms_array, axis=0, weights=weights)
+            
+            # Calculate correction (difference between current and smoothed)
+            diff_dx = (smoothed[0] - dx) * STABILIZATION_STRENGTH
+            diff_dy = (smoothed[1] - dy) * STABILIZATION_STRENGTH
+            diff_da = (smoothed[2] - da) * STABILIZATION_STRENGTH
+            
+            # Limit maximum correction to prevent over-correction
+            max_correction = 10  # pixels
+            diff_dx = np.clip(diff_dx, -max_correction, max_correction)
+            diff_dy = np.clip(diff_dy, -max_correction, max_correction)
+            diff_da = np.clip(diff_da, -0.05, 0.05)  # radians (~3 degrees max)
+            
+            # Create stabilization transform matrix
+            stabilize_transform = np.array([
+                [np.cos(diff_da), -np.sin(diff_da), diff_dx],
+                [np.sin(diff_da), np.cos(diff_da), diff_dy]
+            ], dtype=np.float32)
+            
+            # Apply stabilization
+            stabilized = cv2.warpAffine(frame, stabilize_transform, (w, h),
+                                       borderMode=cv2.BORDER_REPLICATE)
+            
+            # Crop edges to remove border artifacts
+            crop_x = int(w * CROP_PERCENT / 100)
+            crop_y = int(h * CROP_PERCENT / 100)
+            stabilized_cropped = stabilized[crop_y:h-crop_y, crop_x:w-crop_x]
+            
+            # Resize back to original dimensions
+            stabilized_final = cv2.resize(stabilized_cropped, (w, h))
+            
+            # Encode back to JPEG
+            _, buffer = cv2.imencode('.jpg', stabilized_final, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            prev_gray = gray
+            return buffer.tobytes()
+        
+        prev_gray = gray
+        return frame_jpeg
+        
+    except Exception as e:
+        print(f"[Stabilization] Error: {e}")
+        return frame_jpeg
 
 def init_camera():
     """Initialize the camera with full 12MP sensor access"""
@@ -74,7 +197,11 @@ def init_camera():
     })
 
     
-    print("\n✓ Camera streaming full 12MP sensor → ISP downscaled to 1280x720 @ 15fps")
+    print("\n✓ Camera streaming: 12MP sensor → ISP downscaled to 1280x720 @ 15fps")
+    if ENABLE_STABILIZATION:
+        print("  Video stabilization: ENABLED (OpenCV optical flow)")
+    else:
+        print("  Video stabilization: DISABLED")
 
 def monitor_network():
     """Monitor and print network statistics every 5 seconds"""
@@ -131,6 +258,10 @@ def generate_frames():
             with output.condition:
                 output.condition.wait()
                 frame = output.frame
+            
+            # Apply video stabilization
+            if ENABLE_STABILIZATION:
+                frame = stabilize_frame(frame)
             
             # Track bytes sent
             frame_data = (b'--FRAME\r\n'
