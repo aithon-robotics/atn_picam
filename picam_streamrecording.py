@@ -149,7 +149,7 @@ def stop_recording():
 
 def monitor_network():
     """Monitor and print network statistics every 5 seconds"""
-    global bytes_sent, active_clients, start_time
+    global bytes_sent, active_clients, start_time, current_recording_file
     
     last_bytes_sent = 0
     
@@ -169,11 +169,15 @@ def monitor_network():
         cpu_percent = psutil.cpu_percent(interval=0)
         mem = psutil.virtual_memory()
         
-        # Recording status
+        # Recording status and file size
         rec_status = "RECORDING" if recording_active else "IDLE"
+        file_size_mb = 0
+        if recording_active and current_recording_file and os.path.exists(current_recording_file):
+            file_size_mb = os.path.getsize(current_recording_file) / (1024 * 1024)
         
         print(f"[Stats] {rec_status} | Web clients: {active_clients} | "
               f"Stream: {mbps:.2f} Mbps | Total: {total_mb:.1f} MB | "
+              f"Recording: {file_size_mb:.1f} MB | "
               f"CPU: {cpu_percent}% | RAM: {mem.percent}%")
 
 def generate_frames():
