@@ -75,6 +75,11 @@ class GStreamerPipeline:
             "nvarguscamerasrc sensor-id=0 ! "
             "video/x-raw(memory:NVMM), width=1920, height=1080, framerate=30/1, format=NV12 ! "
             
+            # Rotate 180° to fix upside-down image (flip-method=2)
+            # flip-method values: 0=none, 1=counterclockwise, 2=rotate-180, 3=clockwise, 4=horizontal-flip, 5=vertical-flip
+            "nvvidconv flip-method=2 ! "
+            "video/x-raw(memory:NVMM), format=NV12 ! "
+            
             # Tee to split into two streams
             "tee name=t "
             
