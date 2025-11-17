@@ -79,18 +79,21 @@ class GStreamerPipeline:
             "tee name=t "
             
             # Branch 1: H.264 recording to file
-            "t. ! queue max-size-buffers=2 ! "
+            "t. ! queue max-size-buffers=2 leaky=downstream ! "
             "nvv4l2h264enc bitrate=15000000 iframeinterval=30 insert-sps-pps=true insert-vui=true ! "
             "h264parse ! "
             "qtmux ! "
             f"filesink location={recording_file} name=filesink sync=false "
             
             # Branch 2: JPEG encoding for web stream
-            "t. ! queue max-size-buffers=2 ! "
+            "t. ! queue max-size-buffers=2 leaky=downstream ! "
             "nvvidconv ! "
-            "video/x-raw, width=1280, height=720, format=I420 ! "
+            "video/x-raw, format=I420 ! "
+            "videoscale ! "
+            "video/x-raw, width=1280, height=720 ! "
+            "videorate ! "
+            "video/x-raw, framerate=15/1 ! "
             "nvjpegenc quality=80 ! "
-            "image/jpeg, framerate=15/1 ! "
             "appsink name=appsink emit-signals=true max-buffers=2 drop=true"
         )
         
