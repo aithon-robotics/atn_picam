@@ -8,7 +8,8 @@ Raspberry Pi Camera Stream + Record Server on Raspberry Pi Zero 2W
 Compatible with Pi Camera Module 3 and picamera2
 """
 
-from flask import Flask, Response, render_template_string
+from flask import Flask, Response, render_template_string, jsonify
+from flask_cors import CORS
 from picamera2 import Picamera2
 from picamera2.encoders import H264Encoder, MJPEGEncoder
 from picamera2.outputs import FileOutput
@@ -20,6 +21,7 @@ from datetime import datetime
 import os
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 # Storage management constants
 MIN_FREE_SPACE_GB = 10
@@ -152,39 +154,46 @@ def start_recording():
     if recording_active:
         return {"success": False, "message": "Recording already active"}
     
-    # Create recordings directory in home folder
-    recordings_dir = os.path.expanduser("~/recordings")
-    os.makedirs(recordings_dir, exist_ok=True)
+    try:
+        # Create recordings directory in home folder
+        recordings_dir = os.path.expanduser("~/recordings")
+        os.makedirs(recordings_dir, exist_ok=True)
+        
+        # Check storage and cleanup if necessary
+        check_and_cleanup_storage(recordings_dir)
+        
+        # Generate timestamped filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        current_recording_file = os.path.join(recordings_dir, f"drone_{timestamp}.h264")
+        
+        # Create H.264 encoder for high-quality recording
+        h264_encoder = H264Encoder(
+            bitrate=15000000,  # 15Mbps - high quality
+            repeat=True,       # Repeat SPS/PPS for stream recovery
+            iperiod=30,        # I-frame every second (30fps)
+            framerate=30       # CRITICAL: Set framerate to match camera (fixes playback speed)
+        )
+        
+        # Create file output for local storage
+        file_output = FileOutput(current_recording_file)
+        
+        # Single H.264 encoder writing directly to file
+        # This uses the hardware encoder ONCE for maximum efficiency
+        h264_encoder.output = file_output
+        
+        # Start encoding on the MAIN stream (high resolution)
+        camera.start_encoder(h264_encoder, name="main")
+        
+        recording_active = True
+        print(f"\n✓ Started recording to: {current_recording_file}")
+        print(f"  - Local file: Full quality (15Mbps)")
+        return {"success": True, "message": "Recording started", "file": current_recording_file}
     
-    # Check storage and cleanup if necessary
-    check_and_cleanup_storage(recordings_dir)
-    
-    # Generate timestamped filename
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    current_recording_file = os.path.join(recordings_dir, f"drone_{timestamp}.h264")
-    
-    # Create H.264 encoder for high-quality recording
-    h264_encoder = H264Encoder(
-        bitrate=15000000,  # 15Mbps - high quality
-        repeat=True,       # Repeat SPS/PPS for stream recovery
-        iperiod=30,        # I-frame every second (30fps)
-        framerate=30       # CRITICAL: Set framerate to match camera (fixes playback speed)
-    )
-    
-    # Create file output for local storage
-    file_output = FileOutput(current_recording_file)
-    
-    # Single H.264 encoder writing directly to file
-    # This uses the hardware encoder ONCE for maximum efficiency
-    h264_encoder.output = file_output
-    
-    # Start encoding on the MAIN stream (high resolution)
-    camera.start_encoder(h264_encoder, name="main")
-    
-    recording_active = True
-    print(f"\n✓ Started recording to: {current_recording_file}")
-    print(f"  - Local file: Full quality (15Mbps)")
-    return {"success": True, "message": "Recording started", "file": current_recording_file}
+    except Exception as e:
+        print(f"✗ Failed to start recording: {e}")
+        recording_active = False
+        h264_encoder = None
+        return {"success": False, "message": f"Failed to start recording: {str(e)}"}
 
 def stop_recording():
     """Stop H.264 recording"""
@@ -195,13 +204,20 @@ def stop_recording():
     
     saved_file = current_recording_file
     
-    if h264_encoder:
-        camera.stop_encoder(h264_encoder)
-        h264_encoder = None
+    try:
+        if h264_encoder:
+            camera.stop_encoder(h264_encoder)
+            h264_encoder = None
+        
+        recording_active = False
+        print(f"\n✓ Stopped recording: {saved_file}")
+        return {"success": True, "message": "Recording stopped", "file": saved_file}
     
-    recording_active = False
-    print(f"\n✓ Stopped recording: {saved_file}")
-    return {"success": True, "message": "Recording stopped", "file": saved_file}
+    except Exception as e:
+        print(f"✗ Error stopping recording: {e}")
+        recording_active = False
+        h264_encoder = None
+        return {"success": True, "message": f"Recording stopped with errors: {str(e)}", "file": saved_file}
 
 def monitor_network():
     """Monitor and print network statistics every 5 seconds"""
@@ -464,26 +480,27 @@ def video_feed():
 def status():
     """API endpoint to check camera status"""
     if camera is not None:
-        return {
+        response = jsonify({
             'status': 'running',
             'recording': recording_active,
             'file': current_recording_file if recording_active else None,
             'resolution': '1920x1080 @ 30fps',
             'web_stream': '1280x720 @ 15fps'
-        }, 200
-    return {'status': 'stopped'}, 503
+        })
+        return response, 200
+    return jsonify({'status': 'stopped'}), 503
 
 @app.route('/start_recording', methods=['POST'])
 def api_start_recording():
     """API endpoint to start recording"""
     result = start_recording()
-    return result, 200 if result['success'] else 400
+    return jsonify(result), 200 if result['success'] else 400
 
 @app.route('/stop_recording', methods=['POST'])
 def api_stop_recording():
     """API endpoint to stop recording"""
     result = stop_recording()
-    return result, 200 if result['success'] else 400
+    return jsonify(result), 200 if result['success'] else 400
 
 if __name__ == '__main__':
     try:
