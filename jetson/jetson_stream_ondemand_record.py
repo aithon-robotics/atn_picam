@@ -13,7 +13,8 @@ Hardware acceleration:
 - NVMM: Zero-copy memory management
 """
 
-from flask import Flask, Response, render_template_string
+from flask import Flask, Response, render_template_string, jsonify
+from flask_cors import CORS
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
@@ -28,6 +29,7 @@ import queue
 Gst.init(None)
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 # Storage management constants
 MIN_FREE_SPACE_GB = 10
@@ -691,7 +693,7 @@ def video_feed():
 def status():
     """API endpoint to check camera status"""
     if pipeline is not None:
-        return {
+        response = jsonify({
             'status': 'running',
             'recording': recording_active,
             'file': current_recording_file if recording_active else None,
@@ -699,20 +701,21 @@ def status():
             'web_stream': '1280x720 @ 15fps',
             'platform': 'Jetson Orin Nano',
             'camera': 'Pi Camera Module v2'
-        }, 200
-    return {'status': 'stopped'}, 503
+        })
+        return response, 200
+    return jsonify({'status': 'stopped'}), 503
 
 @app.route('/start_recording', methods=['POST'])
 def api_start_recording():
     """API endpoint to start recording"""
     result = start_recording()
-    return result, 200 if result['success'] else 400
+    return jsonify(result), 200 if result['success'] else 400
 
 @app.route('/stop_recording', methods=['POST'])
 def api_stop_recording():
     """API endpoint to stop recording"""
     result = stop_recording()
-    return result, 200 if result['success'] else 400
+    return jsonify(result), 200 if result['success'] else 400
 
 if __name__ == '__main__':
     try:
