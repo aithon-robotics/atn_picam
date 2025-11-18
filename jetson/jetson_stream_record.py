@@ -137,8 +137,11 @@ class GStreamerPipeline:
             
             # Branch 1: H.264 recording to file
             "t. ! queue max-size-buffers=2 leaky=downstream ! "
+            "video/x-raw(memory:NVMM), width=1920, height=1080, framerate=30/1 ! "
             "nvv4l2h264enc bitrate=15000000 iframeinterval=30 insert-sps-pps=true insert-vui=true ! "
+            "video/x-h264, stream-format=byte-stream ! "
             "h264parse ! "
+            "video/x-h264, stream-format=avc ! "
             "qtmux ! "
             f"filesink location={recording_file} name=filesink sync=false "
             
