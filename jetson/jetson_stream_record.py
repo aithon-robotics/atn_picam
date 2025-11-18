@@ -29,6 +29,58 @@ Gst.init(None)
 
 app = Flask(__name__)
 
+# Storage management constants
+MIN_FREE_SPACE_GB = 10
+MIN_FREE_SPACE_BYTES = MIN_FREE_SPACE_GB * 1024 * 1024 * 1024
+
+def check_and_cleanup_storage(recordings_dir):
+    """
+    Check available storage space and delete oldest recordings if below threshold.
+    Maintains at least 10GB of free space.
+    """
+    # Get disk usage statistics
+    stat = os.statvfs(recordings_dir)
+    free_space_bytes = stat.f_bavail * stat.f_frsize
+    free_space_gb = free_space_bytes / (1024 * 1024 * 1024)
+    
+    if free_space_bytes >= MIN_FREE_SPACE_BYTES:
+        print(f"[Storage] Available space: {free_space_gb:.2f} GB (OK)")
+        return
+    
+    print(f"\n⚠️  WARNING: Low storage space detected!")
+    print(f"[Storage] Available: {free_space_gb:.2f} GB (threshold: {MIN_FREE_SPACE_GB} GB)")
+    print(f"[Storage] Starting cleanup of oldest recordings...")
+    
+    # Get all recording files sorted by modification time (oldest first)
+    recordings = []
+    for filename in os.listdir(recordings_dir):
+        filepath = os.path.join(recordings_dir, filename)
+        if os.path.isfile(filepath) and (filename.endswith('.mp4') or filename.endswith('.h264')):
+            recordings.append((filepath, os.path.getmtime(filepath), os.path.getsize(filepath)))
+    
+    recordings.sort(key=lambda x: x[1])  # Sort by modification time
+    
+    # Delete oldest files until we have enough space
+    deleted_count = 0
+    deleted_size_mb = 0
+    
+    for filepath, mtime, size in recordings:
+        if free_space_bytes >= MIN_FREE_SPACE_BYTES:
+            break
+        
+        try:
+            os.remove(filepath)
+            deleted_count += 1
+            deleted_size_mb += size / (1024 * 1024)
+            free_space_bytes += size
+            print(f"[Storage] Deleted: {os.path.basename(filepath)} ({size/(1024*1024):.1f} MB)")
+        except OSError as e:
+            print(f"[Storage] Failed to delete {filepath}: {e}")
+    
+    free_space_gb = free_space_bytes / (1024 * 1024 * 1024)
+    print(f"[Storage] Cleanup complete: Deleted {deleted_count} file(s) ({deleted_size_mb:.1f} MB)")
+    print(f"[Storage] Available space now: {free_space_gb:.2f} GB\n")
+
 # Global variables
 pipeline = None
 h264_filesink = None
@@ -174,10 +226,44 @@ class GStreamerPipeline:
         return False
     
     def stop(self):
-        """Stop the GStreamer pipeline"""
+        """Stop the GStreamer pipeline cleanly with EOS"""
         if self.pipeline:
+            print("[GStreamer] Sending EOS (End of Stream) to finalize recording...")
+            
+            # Send EOS event to properly finalize the MP4 file
+            self.pipeline.send_event(Gst.Event.new_eos())
+            
+            # Wait for EOS to be processed (max 5 seconds)
+            bus = self.pipeline.get_bus()
+            msg = bus.timed_pop_filtered(
+                5 * Gst.SECOND,
+                Gst.MessageType.EOS | Gst.MessageType.ERROR
+            )
+            
+            if msg:
+                if msg.type == Gst.MessageType.EOS:
+                    print("[GStreamer] EOS received, file finalized successfully")
+                elif msg.type == Gst.MessageType.ERROR:
+                    err, debug = msg.parse_error()
+                    print(f"[GStreamer] Error during EOS: {err}")
+            else:
+                print("[GStreamer] Warning: EOS timeout (file may be incomplete)")
+            
+            # Now stop the pipeline
             print("[GStreamer] Stopping pipeline...")
+            self.pipeline.set_state(Gst.State.PAUSED)
+            time.sleep(0.1)
+            self.pipeline.set_state(Gst.State.READY)
+            time.sleep(0.1)
             self.pipeline.set_state(Gst.State.NULL)
+            
+            # Wait for state change to complete
+            ret = self.pipeline.get_state(Gst.CLOCK_TIME_NONE)
+            if ret[0] == Gst.StateChangeReturn.SUCCESS:
+                print("[GStreamer] Pipeline stopped cleanly")
+            else:
+                print("[GStreamer] Warning: Pipeline state change incomplete")
+            
             if self.loop:
                 self.loop.quit()
     
@@ -198,12 +284,16 @@ def init_camera():
     """
     global pipeline, recording_active, current_recording_file, pipeline_thread, main_loop
     
-    # Create recordings directory
-    os.makedirs("recordings", exist_ok=True)
+    # Create recordings directory in home folder
+    recordings_dir = os.path.expanduser("~/recordings")
+    os.makedirs(recordings_dir, exist_ok=True)
+    
+    # Check storage and cleanup if necessary
+    check_and_cleanup_storage(recordings_dir)
     
     # Generate timestamped filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    current_recording_file = f"recordings/jetson_{timestamp}.mp4"
+    current_recording_file = os.path.join(recordings_dir, f"jetson_{timestamp}.mp4")
     
     # Create GStreamer pipeline
     pipeline = GStreamerPipeline()
@@ -230,12 +320,21 @@ def init_camera():
 
 def stop_recording():
     """Stop recording and clean up pipeline"""
-    global recording_active, pipeline
+    global recording_active, pipeline, pipeline_thread
     
-    if pipeline:
-        pipeline.stop()
+    if pipeline and recording_active:
         recording_active = False
+        pipeline.stop()
+        
+        # Wait for pipeline thread to finish
+        if pipeline_thread and pipeline_thread.is_alive():
+            print("[GStreamer] Waiting for pipeline thread to finish...")
+            pipeline_thread.join(timeout=3.0)
+        
         print(f"\n✓ Stopped recording: {current_recording_file}")
+        
+        # Give system time to release camera resources
+        time.sleep(0.5)
 
 def monitor_stats():
     """Monitor and print system statistics every 5 seconds"""
@@ -455,12 +554,17 @@ if __name__ == '__main__':
         app.run(host='0.0.0.0', port=8080, threaded=True, debug=False)
         
     except KeyboardInterrupt:
-        print("\n\nStopping camera system...")
-        stop_recording()
+        print("\n\n[Shutdown] Ctrl+C detected, stopping camera system...")
     except Exception as e:
-        print(f"\nError: {e}")
+        print(f"\n[Error] {e}")
         import traceback
         traceback.print_exc()
-        stop_recording()
     finally:
-        print("Camera closed. Goodbye!")
+        print("\n[Shutdown] Cleaning up resources...")
+        stop_recording()
+        
+        # Additional cleanup time for Argus/camera subsystem
+        print("[Shutdown] Releasing camera hardware...")
+        time.sleep(1.0)
+        
+        print("[Shutdown] Camera closed. Goodbye!")
