@@ -585,6 +585,11 @@ def index():
                     margin-top: 10px;
                     font-size: 16px;
                 }
+                .storage-text {
+                    color: #bdc3c7;
+                    font-size: 12px;
+                    margin-top: 5px;
+                }
             </style>
         </head>
         <body>
@@ -593,6 +598,7 @@ def index():
                 <div class="control-panel">
                     <button id="recordBtn" class="record-button idle" onclick="toggleRecording()">⏺ Start Recording</button>
                     <div class="status-text" id="statusText">Status: {{ rec_status }}</div>
+                    <div class="storage-text" id="storageText">Loading storage info...</div>
                 </div>
                 <h2>Live Web Feed (MJPEG)</h2>
                 <img src="{{ url_for('video_feed') }}" alt="Camera Stream">
@@ -621,6 +627,22 @@ def index():
             </div>
             <script>
                 let isRecording = {{ 'true' if recording_active else 'false' }};
+                let storageInfo = null;
+                
+                async function updateStorageInfo() {
+                    try {
+                        const response = await fetch('/storage_info');
+                        const data = await response.json();
+                        
+                        if (data.success) {
+                            storageInfo = data;
+                            const storageText = document.getElementById('storageText');
+                            storageText.textContent = `Storage: ${data.free_gb} GB free / ${data.total_gb} GB total`;
+                        }
+                    } catch (error) {
+                        console.error('Failed to fetch storage info:', error);
+                    }
+                }
                 
                 function updateUI() {
                     const btn = document.getElementById('recordBtn');
@@ -652,6 +674,11 @@ def index():
                         if (data.success) {
                             isRecording = !isRecording;
                             updateUI();
+                            
+                            // Update storage info after stopping recording
+                            if (!isRecording) {
+                                await updateStorageInfo();
+                            }
                         } else {
                             alert('Error: ' + data.message);
                         }
@@ -662,8 +689,9 @@ def index():
                     }
                 }
                 
-                // Update UI on page load
+                // Update UI and storage info on page load
                 updateUI();
+                updateStorageInfo();
                 
                 // Poll status every 2 seconds
                 setInterval(async () => {
@@ -716,6 +744,29 @@ def api_stop_recording():
     """API endpoint to stop recording"""
     result = stop_recording()
     return jsonify(result), 200 if result['success'] else 400
+
+@app.route('/storage_info')
+def storage_info():
+    """API endpoint to get storage information"""
+    try:
+        recordings_dir = os.path.expanduser("~/recordings")
+        os.makedirs(recordings_dir, exist_ok=True)
+        
+        # Get disk usage statistics
+        stat = os.statvfs(recordings_dir)
+        free_space_gb = (stat.f_bavail * stat.f_frsize) / (1024 * 1024 * 1024)
+        total_space_gb = (stat.f_blocks * stat.f_frsize) / (1024 * 1024 * 1024)
+        used_space_gb = total_space_gb - free_space_gb
+        
+        return jsonify({
+            'success': True,
+            'free_gb': round(free_space_gb, 2),
+            'total_gb': round(total_space_gb, 2),
+            'used_gb': round(used_space_gb, 2),
+            'percent_used': round((used_space_gb / total_space_gb) * 100, 1) if total_space_gb > 0 else 0
+        }), 200
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 if __name__ == '__main__':
     try:
