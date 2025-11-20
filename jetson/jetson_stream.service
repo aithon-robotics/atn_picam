@@ -1,0 +1,19 @@
+[Unit]
+Description=Jetson Camera Stream and Recording Server
+After=network.target
+
+[Service]
+Type=simple
+User=atn
+WorkingDirectory=/home/atn/aithon_code/atn_picam/jetson
+ExecStart=/usr/bin/python3 /home/atn/aithon_code/atn_picam/jetson/jetson_stream_ondemand_record.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Optional: Set environment variables if needed
+# Environment="PYTHONUNBUFFERED=1"
+
+[Install]
+WantedBy=multi-user.target
