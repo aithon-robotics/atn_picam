@@ -5,8 +5,9 @@ After=network.target
 [Service]
 Type=simple
 User=atn
-WorkingDirectory=/home/atn/aithon_code/atn_picam/jetson
-ExecStart=/usr/bin/python3 /home/atn/aithon_code/atn_picam/jetson/jetson_stream_ondemand_record.py
+WorkingDirectory=/home/atn/aithon_code/atn_picam
+Environment="PYTHONPATH=/home/atn/aithon_code/atn_picam/src"
+ExecStart=/home/atn/aithon_code/atn_picam/venv/bin/python3 -m atn_picam.jetson.stream
 Restart=always
 RestartSec=10
 StandardOutput=journal

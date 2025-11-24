@@ -1,13 +1,25 @@
 #!/bin/bash
 
-SERVICE_NAME="picam_webrtc.service"
-SERVICE_FILE="picam_webrtc.service"
-SYSTEMD_PATH="/etc/systemd/system/$SERVICE_NAME"
-
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then 
-  echo "Please run as root (sudo ./setup_webrtc_service.sh)"
+  echo "Please run as root (sudo ./setup_services.sh <service_name>)"
   exit
+fi
+
+if [ -z "$1" ]; then
+    echo "Usage: $0 <service_name.service>"
+    echo "Available services:"
+    ls *.service
+    exit 1
+fi
+
+SERVICE_NAME="$1"
+SERVICE_FILE="$PWD/$SERVICE_NAME"
+SYSTEMD_PATH="/etc/systemd/system/$SERVICE_NAME"
+
+if [ ! -f "$SERVICE_FILE" ]; then
+    echo "Error: Service file $SERVICE_FILE not found!"
+    exit 1
 fi
 
 echo "Setting up $SERVICE_NAME..."
