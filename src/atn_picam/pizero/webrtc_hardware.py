@@ -396,6 +396,10 @@ async def monitor_loop():
 
 async def on_startup(app):
     app['monitor_task'] = asyncio.create_task(monitor_loop())
+    
+    # Auto-start streaming on startup
+    print("Auto-starting stream to MediaMTX...")
+    camera_manager.start_streaming()
 
 async def on_shutdown(app):
     # Cancel monitor task
