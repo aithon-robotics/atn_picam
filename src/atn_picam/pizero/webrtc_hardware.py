@@ -254,7 +254,35 @@ class CameraManager:
             self._check_stop_encoder()
             
             print(f"Stopped recording: {filename}")
-            return {"success": True, "file": filename}
+            
+            # Convert to MP4 for compatibility
+            mp4_filename = filename.replace(".h264", ".mp4")
+            print(f"Converting to MP4: {mp4_filename}")
+            
+            try:
+                # Use ffmpeg to mux into mp4 container
+                # -framerate 30: Tell ffmpeg the input framerate (since raw h264 might not have it)
+                # -c copy: Copy streams without re-encoding (fast)
+                cmd = [
+                    'ffmpeg',
+                    '-framerate', '30',
+                    '-i', filename,
+                    '-c', 'copy',
+                    '-y',
+                    mp4_filename
+                ]
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+                # Remove original h264 file
+                if os.path.exists(mp4_filename):
+                    os.remove(filename)
+                    return {"success": True, "file": mp4_filename}
+                else:
+                    return {"success": True, "file": filename, "warning": "MP4 conversion produced no file"}
+                    
+            except Exception as conv_e:
+                print(f"MP4 conversion failed: {conv_e}")
+                return {"success": True, "file": filename, "warning": f"MP4 conversion failed: {conv_e}"}
             
         except Exception as e:
             print(f"Stop recording failed: {e}")
