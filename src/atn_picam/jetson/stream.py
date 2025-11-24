@@ -13,7 +13,8 @@ Hardware acceleration:
 - NVMM: Zero-copy memory management
 """
 
-from flask import Flask, Response, render_template_string
+from flask import Flask, Response, render_template, jsonify
+from flask_cors import CORS
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
@@ -23,63 +24,13 @@ import psutil
 from datetime import datetime
 import os
 import queue
+from atn_picam.core.storage import check_and_cleanup_storage
 
 # Initialize GStreamer
 Gst.init(None)
 
-app = Flask(__name__)
-
-# Storage management constants
-MIN_FREE_SPACE_GB = 10
-MIN_FREE_SPACE_BYTES = MIN_FREE_SPACE_GB * 1024 * 1024 * 1024
-
-def check_and_cleanup_storage(recordings_dir):
-    """
-    Check available storage space and delete oldest recordings if below threshold.
-    Maintains at least 10GB of free space.
-    """
-    # Get disk usage statistics
-    stat = os.statvfs(recordings_dir)
-    free_space_bytes = stat.f_bavail * stat.f_frsize
-    free_space_gb = free_space_bytes / (1024 * 1024 * 1024)
-    
-    if free_space_bytes >= MIN_FREE_SPACE_BYTES:
-        print(f"[Storage] Available space: {free_space_gb:.2f} GB (OK)")
-        return
-    
-    print(f"\n⚠️  WARNING: Low storage space detected!")
-    print(f"[Storage] Available: {free_space_gb:.2f} GB (threshold: {MIN_FREE_SPACE_GB} GB)")
-    print(f"[Storage] Starting cleanup of oldest recordings...")
-    
-    # Get all recording files sorted by modification time (oldest first)
-    recordings = []
-    for filename in os.listdir(recordings_dir):
-        filepath = os.path.join(recordings_dir, filename)
-        if os.path.isfile(filepath) and (filename.endswith('.mp4') or filename.endswith('.h264')):
-            recordings.append((filepath, os.path.getmtime(filepath), os.path.getsize(filepath)))
-    
-    recordings.sort(key=lambda x: x[1])  # Sort by modification time
-    
-    # Delete oldest files until we have enough space
-    deleted_count = 0
-    deleted_size_mb = 0
-    
-    for filepath, mtime, size in recordings:
-        if free_space_bytes >= MIN_FREE_SPACE_BYTES:
-            break
-        
-        try:
-            os.remove(filepath)
-            deleted_count += 1
-            deleted_size_mb += size / (1024 * 1024)
-            free_space_bytes += size
-            print(f"[Storage] Deleted: {os.path.basename(filepath)} ({size/(1024*1024):.1f} MB)")
-        except OSError as e:
-            print(f"[Storage] Failed to delete {filepath}: {e}")
-    
-    free_space_gb = free_space_bytes / (1024 * 1024 * 1024)
-    print(f"[Storage] Cleanup complete: Deleted {deleted_count} file(s) ({deleted_size_mb:.1f} MB)")
-    print(f"[Storage] Available space now: {free_space_gb:.2f} GB\n")
+app = Flask(__name__, template_folder='../templates')
+CORS(app)  # Enable CORS for all routes
 
 # Global variables
 pipeline = None
@@ -108,14 +59,14 @@ class GStreamerPipeline:
         self.filesink = None
         self.loop = None
         
-    def create_pipeline(self, recording_file):
+    def create_pipeline(self, recording_file=None):
         """
-        Create GStreamer pipeline with dual output:
-        1. High-quality H.264 recording to file
-        2. MJPEG stream for web viewing
+        Create GStreamer pipeline with optional recording:
+        - Always: MJPEG stream for web viewing
+        - Optional: H.264 recording to file (if recording_file is provided)
         
         Pipeline structure:
-        nvv4l2camerasrc → tee → [queue → nvvidconv → nvv4l2h264enc → filesink]
+        nvarguscamerasrc → tee → [optional: queue → nvvidconv → nvv4l2h264enc → filesink]
                               → [queue → nvvidconv → nvjpegenc → appsink]
         """
         
@@ -134,18 +85,23 @@ class GStreamerPipeline:
             
             # Tee to split into two streams
             "tee name=t "
-            
-            # Branch 1: H.264 recording to file
-            "t. ! queue max-size-buffers=2 leaky=downstream ! "
-            "video/x-raw(memory:NVMM), width=1920, height=1080, framerate=30/1 ! "
-            "nvv4l2h264enc bitrate=15000000 iframeinterval=30 insert-sps-pps=true insert-vui=true ! "
-            "video/x-h264, stream-format=byte-stream ! "
-            "h264parse ! "
-            "video/x-h264, stream-format=avc ! "
-            "qtmux ! "
-            f"filesink location={recording_file} name=filesink sync=false "
-            
-            # Branch 2: JPEG encoding for web stream
+        )
+        
+        # Branch 1: H.264 recording to file (optional)
+        if recording_file:
+            pipeline_str += (
+                "t. ! queue max-size-buffers=2 leaky=downstream ! "
+                "video/x-raw(memory:NVMM), width=1920, height=1080, framerate=30/1 ! "
+                "nvv4l2h264enc bitrate=15000000 iframeinterval=30 insert-sps-pps=true insert-vui=true ! "
+                "video/x-h264, stream-format=byte-stream ! "
+                "h264parse ! "
+                "video/x-h264, stream-format=avc ! "
+                "qtmux ! "
+                f"filesink location={recording_file} name=filesink sync=false "
+            )
+        
+        # Branch 2: JPEG encoding for web stream (always)
+        pipeline_str += (
             "t. ! queue max-size-buffers=2 leaky=downstream ! "
             "nvvidconv ! "
             "video/x-raw, format=I420 ! "
@@ -158,7 +114,8 @@ class GStreamerPipeline:
         )
         
         print(f"\n[GStreamer] Creating pipeline...")
-        print(f"[GStreamer] Recording: 1920x1080 @ 30fps H.264 → {recording_file}")
+        if recording_file:
+            print(f"[GStreamer] Recording: 1920x1080 @ 30fps H.264 → {recording_file}")
         print(f"[GStreamer] Streaming: 1280x720 @ 15fps MJPEG → web")
         
         # Parse and create pipeline
@@ -280,12 +237,42 @@ class GStreamerPipeline:
 
 def init_camera():
     """
-    Initialize camera system with GStreamer pipeline.
-    Creates dual-stream output:
-    - H.264 recording to file (hardware encoded)
-    - MJPEG stream for web (hardware encoded)
+    Initialize camera system with GStreamer pipeline for streaming only.
+    Recording can be started/stopped on-demand via web interface.
     """
     global pipeline, recording_active, current_recording_file, pipeline_thread, main_loop
+    
+    # Create recordings directory in home folder
+    recordings_dir = os.path.expanduser("~/recordings")
+    os.makedirs(recordings_dir, exist_ok=True)
+    
+    # Create GStreamer pipeline (stream only, no recording yet)
+    pipeline = GStreamerPipeline()
+    pipeline.create_pipeline(recording_file=None)
+    
+    # Start pipeline
+    if pipeline.start():
+        # Run GLib main loop in separate thread
+        pipeline_thread = threading.Thread(target=pipeline.run_loop, daemon=True)
+        pipeline_thread.start()
+        
+        print("\n✓ Camera initialized:")
+        print(f"  - Streaming: 1280x720 @ 15fps (MJPEG, ~10Mbps) → web")
+        print(f"  - Hardware: NVJPEG (JPEG) + NVMM (zero-copy)")
+        print(f"  - Sensor: Pi Camera Module v2 (8MP, 3280×2464)")
+        print(f"  - Recording: On-demand via web interface")
+        
+        return True
+    else:
+        print("✗ Failed to initialize camera")
+        return False
+
+def start_recording():
+    """Start H.264 recording by recreating pipeline with recording branch"""
+    global recording_active, current_recording_file, pipeline, pipeline_thread
+    
+    if recording_active:
+        return {"success": False, "message": "Recording already active"}
     
     # Create recordings directory in home folder
     recordings_dir = os.path.expanduser("~/recordings")
@@ -298,34 +285,71 @@ def init_camera():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     current_recording_file = os.path.join(recordings_dir, f"jetson_{timestamp}.mp4")
     
-    # Create GStreamer pipeline
-    pipeline = GStreamerPipeline()
-    pipeline.create_pipeline(current_recording_file)
+    # Stop current pipeline
+    if pipeline:
+        print("[Recording] Stopping stream-only pipeline...")
+        old_pipeline = pipeline
+        pipeline = None
+        old_pipeline.stop()
+        if pipeline_thread and pipeline_thread.is_alive():
+            pipeline_thread.join(timeout=3.0)
     
-    # Start pipeline
+    # Create new pipeline with recording
+    print("[Recording] Creating pipeline with recording enabled...")
+    pipeline = GStreamerPipeline()
+    pipeline.create_pipeline(recording_file=current_recording_file)
+    
     if pipeline.start():
         recording_active = True
-        
-        # Run GLib main loop in separate thread
         pipeline_thread = threading.Thread(target=pipeline.run_loop, daemon=True)
         pipeline_thread.start()
-        
-        print("\n✓ Camera initialized:")
-        print(f"  - Recording: 1920x1080 @ 30fps (H.264, 15Mbps) → {current_recording_file}")
-        print(f"  - Streaming: 1280x720 @ 15fps (MJPEG, ~10Mbps) → web")
-        print(f"  - Hardware: NVENC (H.264) + NVJPEG (JPEG) + NVMM (zero-copy)")
-        print(f"  - Sensor: Pi Camera Module v2 (8MP, 3280×2464)")
-        
-        return True
+        print(f"\n✓ Started recording: {current_recording_file}")
+        return {"success": True, "message": "Recording started", "file": current_recording_file}
     else:
-        print("✗ Failed to initialize camera")
-        return False
+        print("✗ Failed to start recording")
+        return {"success": False, "message": "Failed to start recording"}
 
 def stop_recording():
-    """Stop recording and clean up pipeline"""
+    """Stop recording by recreating pipeline without recording branch"""
     global recording_active, pipeline, pipeline_thread
     
-    if pipeline and recording_active:
+    if not recording_active:
+        return {"success": False, "message": "No active recording"}
+    
+    saved_file = current_recording_file
+    
+    # Stop current pipeline with recording
+    if pipeline:
+        print("[Recording] Stopping pipeline with recording...")
+        old_pipeline = pipeline
+        pipeline = None
+        recording_active = False
+        old_pipeline.stop()
+        if pipeline_thread and pipeline_thread.is_alive():
+            pipeline_thread.join(timeout=3.0)
+    
+    # Give system time to finalize file
+    time.sleep(0.5)
+    
+    # Recreate stream-only pipeline
+    print("[Recording] Recreating stream-only pipeline...")
+    pipeline = GStreamerPipeline()
+    pipeline.create_pipeline(recording_file=None)
+    
+    if pipeline.start():
+        pipeline_thread = threading.Thread(target=pipeline.run_loop, daemon=True)
+        pipeline_thread.start()
+        print(f"\n✓ Stopped recording: {saved_file}")
+        return {"success": True, "message": "Recording stopped", "file": saved_file}
+    else:
+        print("✗ Failed to restart stream")
+        return {"success": False, "message": "Recording stopped but stream failed to restart"}
+
+def shutdown_camera():
+    """Shutdown camera system completely"""
+    global recording_active, pipeline, pipeline_thread
+    
+    if pipeline:
         recording_active = False
         pipeline.stop()
         
@@ -334,7 +358,8 @@ def stop_recording():
             print("[GStreamer] Waiting for pipeline thread to finish...")
             pipeline_thread.join(timeout=3.0)
         
-        print(f"\n✓ Stopped recording: {current_recording_file}")
+        if recording_active:
+            print(f"\n✓ Stopped recording: {current_recording_file}")
         
         # Give system time to release camera resources
         time.sleep(0.5)
@@ -413,98 +438,8 @@ def generate_frames():
 @app.route('/')
 def index():
     """Serve the main web page with embedded camera stream"""
-    return render_template_string('''
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Jetson Camera Stream + Record</title>
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    text-align: center;
-                    background-color: #f0f0f0;
-                    margin: 0;
-                    padding: 20px;
-                }
-                h1 {
-                    color: #333;
-                }
-                .stream-container {
-                    margin: 20px auto;
-                    max-width: 1280px;
-                    background: white;
-                    padding: 20px;
-                    border-radius: 10px;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-                }
-                img {
-                    max-width: 100%;
-                    height: auto;
-                    border: 2px solid #76b900;
-                    border-radius: 5px;
-                }
-                .info {
-                    margin-top: 20px;
-                    color: #666;
-                    font-size: 14px;
-                    text-align: left;
-                }
-                .recording-indicator {
-                    display: inline-block;
-                    width: 12px;
-                    height: 12px;
-                    background: #76b900;
-                    border-radius: 50%;
-                    animation: pulse 1.5s ease-in-out infinite;
-                    margin-right: 8px;
-                }
-                @keyframes pulse {
-                    0%, 100% { opacity: 1; }
-                    50% { opacity: 0.3; }
-                }
-                .specs {
-                    background: #ecf0f1;
-                    padding: 15px;
-                    border-radius: 5px;
-                    margin-top: 15px;
-                }
-                .nvidia-badge {
-                    color: #76b900;
-                    font-weight: bold;
-                }
-            </style>
-        </head>
-        <body>
-            <h1><span class="recording-indicator"></span>Jetson Camera Stream + Recording</h1>
-            <div class="stream-container">
-                <h2>Live Web Feed (MJPEG)</h2>
-                <img src="{{ url_for('video_feed') }}" alt="Camera Stream">
-                <div class="info">
-                    <p><strong>Web Stream:</strong> 1280x720 @ 15fps, ~10Mbps</p>
-                    <p><strong>Status:</strong> Recording to local storage simultaneously</p>
-                    <div class="specs">
-                        <h3>Recording Specifications:</h3>
-                        <ul>
-                            <li><strong>Resolution:</strong> 1920x1080 @ 30fps</li>
-                            <li><strong>Codec:</strong> H.264 (hardware encoded via NVENC)</li>
-                            <li><strong>Bitrate:</strong> 15Mbps (high quality)</li>
-                            <li><strong>Storage:</strong> MP4 files in recordings/</li>
-                            <li><strong>Camera:</strong> Pi Camera Module v2 (8MP CSI)</li>
-                        </ul>
-                        <h3>Hardware Acceleration:</h3>
-                        <ul>
-                            <li class="nvidia-badge">NVIDIA NVENC</li> - H.264 hardware encoding
-                            <li class="nvidia-badge">NVIDIA NVJPEG</li> - JPEG hardware encoding
-                            <li class="nvidia-badge">NVIDIA NVMM</li> - Zero-copy memory management
-                            <li class="nvidia-badge">Jetson Orin Nano</li> - Optimized for low CPU usage
-                        </ul>
-                        <p><em>Expected CPU usage: 15-25% (vs 40-55% on Pi Zero 2 W)</em></p>
-                    </div>
-                </div>
-            </div>
-        </body>
-        </html>
-    ''')
+    rec_status = "Recording" if recording_active else "Not Recording"
+    return render_template('jetson_stream.html', rec_status=rec_status, recording_active=recording_active)
 
 @app.route('/stream')
 def video_feed():
@@ -515,19 +450,55 @@ def video_feed():
 @app.route('/status')
 def status():
     """API endpoint to check camera status"""
-    if pipeline is not None and recording_active:
-        return {
+    if pipeline is not None:
+        response = jsonify({
             'status': 'running',
             'recording': recording_active,
-            'file': current_recording_file,
+            'file': current_recording_file if recording_active else None,
             'resolution': '1920x1080 @ 30fps',
             'web_stream': '1280x720 @ 15fps',
             'platform': 'Jetson Orin Nano',
             'camera': 'Pi Camera Module v2'
-        }, 200
-    return {'status': 'stopped'}, 503
+        })
+        return response, 200
+    return jsonify({'status': 'stopped'}), 503
 
-if __name__ == '__main__':
+@app.route('/start_recording', methods=['POST'])
+def api_start_recording():
+    """API endpoint to start recording"""
+    result = start_recording()
+    return jsonify(result), 200 if result['success'] else 400
+
+@app.route('/stop_recording', methods=['POST'])
+def api_stop_recording():
+    """API endpoint to stop recording"""
+    result = stop_recording()
+    return jsonify(result), 200 if result['success'] else 400
+
+@app.route('/storage_info')
+def storage_info():
+    """API endpoint to get storage information"""
+    try:
+        recordings_dir = os.path.expanduser("~/recordings")
+        os.makedirs(recordings_dir, exist_ok=True)
+        
+        # Get disk usage statistics
+        stat = os.statvfs(recordings_dir)
+        free_space_gb = (stat.f_bavail * stat.f_frsize) / (1024 * 1024 * 1024)
+        total_space_gb = (stat.f_blocks * stat.f_frsize) / (1024 * 1024 * 1024)
+        used_space_gb = total_space_gb - free_space_gb
+        
+        return jsonify({
+            'success': True,
+            'free_gb': round(free_space_gb, 2),
+            'total_gb': round(total_space_gb, 2),
+            'used_gb': round(used_space_gb, 2),
+            'percent_used': round((used_space_gb / total_space_gb) * 100, 1) if total_space_gb > 0 else 0
+        }), 200
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+def main():
     try:
         print("=" * 70)
         print("Jetson Orin Nano Camera Stream + Record Server")
@@ -564,10 +535,13 @@ if __name__ == '__main__':
         traceback.print_exc()
     finally:
         print("\n[Shutdown] Cleaning up resources...")
-        stop_recording()
+        shutdown_camera()
         
         # Additional cleanup time for Argus/camera subsystem
         print("[Shutdown] Releasing camera hardware...")
         time.sleep(1.0)
         
         print("[Shutdown] Camera closed. Goodbye!")
+
+if __name__ == '__main__':
+    main()

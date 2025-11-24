@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atn_picam"
+version = "0.1.0"
+description = "Video streaming and recording package for Jetson and Pi Zero"
+readme = "README.md"
+requires-python = ">=3.7"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+]
+dependencies = [
+    "flask",
+    "flask-cors",
+    "psutil",
+    "aiohttp",
+    "aiortc",
+    "av",
+]
+
+[project.optional-dependencies]
+jetson = [
+    # GStreamer python bindings are usually system packages
+]
+pizero = [
+    # picamera2 is usually a system package on RPi
+]
+
+[project.scripts]
+atn-jetson-stream = "atn_picam.jetson.stream:main"
+atn-pizero-stream = "atn_picam.pizero.stream:main"
+atn-pizero-webrtc = "atn_picam.pizero.webrtc:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

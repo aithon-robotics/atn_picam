@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Jetson Camera Stream + Record</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            background-color: #f0f0f0;
+            margin: 0;
+            padding: 20px;
+        }
+        h1 {
+            color: #333;
+        }
+        .stream-container {
+            margin: 20px auto;
+            max-width: 1280px;
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        img {
+            max-width: 100%;
+            height: auto;
+            border: 2px solid #76b900;
+            border-radius: 5px;
+        }
+        .info {
+            margin-top: 20px;
+            color: #666;
+            font-size: 14px;
+            text-align: left;
+        }
+        .recording-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            background: #76b900;
+            border-radius: 50%;
+            animation: pulse 1.5s ease-in-out infinite;
+            margin-right: 8px;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+        .specs {
+            background: #ecf0f1;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 15px;
+        }
+        .nvidia-badge {
+            color: #76b900;
+            font-weight: bold;
+        }
+        .control-panel {
+            background: #2c3e50;
+            padding: 20px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .record-button {
+            padding: 15px 30px;
+            font-size: 18px;
+            font-weight: bold;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        .record-button.idle {
+            background: #e74c3c;
+            color: white;
+        }
+        .record-button.idle:hover {
+            background: #c0392b;
+        }
+        .record-button.recording {
+            background: #76b900;
+            color: white;
+            animation: pulse-btn 1.5s ease-in-out infinite;
+        }
+        @keyframes pulse-btn {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+        .status-text {
+            color: white;
+            margin-top: 10px;
+            font-size: 16px;
+        }
+        .storage-text {
+            color: #bdc3c7;
+            font-size: 12px;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1><span class="recording-indicator" id="indicator"></span>Jetson Camera Stream</h1>
+    <div class="stream-container">
+        <div class="control-panel">
+            <button id="recordBtn" class="record-button idle" onclick="toggleRecording()">⏺ Start Recording</button>
+            <div class="status-text" id="statusText">Status: {{ rec_status }}</div>
+            <div class="storage-text" id="storageText">Loading storage info...</div>
+        </div>
+        <h2>Live Web Feed (MJPEG)</h2>
+        <img src="{{ url_for('video_feed') }}" alt="Camera Stream">
+        <div class="info">
+            <p><strong>Web Stream:</strong> 1280x720 @ 15fps, ~10Mbps</p>
+            <p><strong>Status:</strong> Recording to local storage simultaneously</p>
+            <div class="specs">
+                <h3>Recording Specifications:</h3>
+                <ul>
+                    <li><strong>Resolution:</strong> 1920x1080 @ 30fps</li>
+                    <li><strong>Codec:</strong> H.264 (hardware encoded via NVENC)</li>
+                    <li><strong>Bitrate:</strong> 15Mbps (high quality)</li>
+                    <li><strong>Storage:</strong> MP4 files in recordings/</li>
+                    <li><strong>Camera:</strong> Pi Camera Module v2 (8MP CSI)</li>
+                </ul>
+                <h3>Hardware Acceleration:</h3>
+                <ul>
+                    <li class="nvidia-badge">NVIDIA NVENC</li> - H.264 hardware encoding
+                    <li class="nvidia-badge">NVIDIA NVJPEG</li> - JPEG hardware encoding
+                    <li class="nvidia-badge">NVIDIA NVMM</li> - Zero-copy memory management
+                    <li class="nvidia-badge">Jetson Orin Nano</li> - Optimized for low CPU usage
+                </ul>
+                <p><em>Expected CPU usage: 15-25% (vs 40-55% on Pi Zero 2 W)</em></p>
+            </div>
+        </div>
+    </div>
+    <script>
+        let isRecording = {{ 'true' if recording_active else 'false' }};
+        let storageInfo = null;
+        
+        async function updateStorageInfo() {
+            try {
+                const response = await fetch('/storage_info');
+                const data = await response.json();
+                
+                if (data.success) {
+                    storageInfo = data;
+                    const storageText = document.getElementById('storageText');
+                    storageText.textContent = `Storage: ${data.free_gb} GB free / ${data.total_gb} GB total`;
+                }
+            } catch (error) {
+                console.error('Failed to fetch storage info:', error);
+            }
+        }
+        
+        function updateUI() {
+            const btn = document.getElementById('recordBtn');
+            const indicator = document.getElementById('indicator');
+            const status = document.getElementById('statusText');
+            
+            if (isRecording) {
+                btn.textContent = '⏹ Stop Recording';
+                btn.className = 'record-button recording';
+                indicator.style.display = 'inline-block';
+                status.textContent = 'Status: Recording';
+            } else {
+                btn.textContent = '⏺ Start Recording';
+                btn.className = 'record-button idle';
+                indicator.style.display = 'none';
+                status.textContent = 'Status: Not Recording';
+            }
+        }
+        
+        async function toggleRecording() {
+            const btn = document.getElementById('recordBtn');
+            btn.disabled = true;
+            
+            try {
+                const endpoint = isRecording ? '/stop_recording' : '/start_recording';
+                const response = await fetch(endpoint, { method: 'POST' });
+                const data = await response.json();
+                
+                if (data.success) {
+                    isRecording = !isRecording;
+                    updateUI();
+                    
+                    // Update storage info after stopping recording
+                    if (!isRecording) {
+                        await updateStorageInfo();
+                    }
+                } else {
+                    alert('Error: ' + data.message);
+                }
+            } catch (error) {
+                alert('Request failed: ' + error);
+            } finally {
+                btn.disabled = false;
+            }
+        }
+        
+        // Update UI and storage info on page load
+        updateUI();
+        updateStorageInfo();
+        
+        // Poll status every 2 seconds
+        setInterval(async () => {
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+                if (data.status === 'running') {
+                    isRecording = data.recording;
+                    updateUI();
+                }
+            } catch (error) {
+                console.error('Status check failed:', error);
+            }
+        }, 2000);
+    </script>
+</body>
+</html>

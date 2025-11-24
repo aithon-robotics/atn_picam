@@ -14,35 +14,51 @@ Both implementations record H.264 video to disk while streaming MJPEG to a web b
 
 ```
 atn_picam/
-├── jetson/                          # Jetson Orin Nano implementation
-│   ├── jetson_stream_record.py     # Main application
-│   ├── test_setup.py               # Hardware verification
-│   ├── README.md                   # Full documentation
-│   ├── QUICKSTART.md              # Quick start guide
-│   ├── SUMMARY.md                 # Implementation summary
-│   ├── IMPLEMENTATION_NOTES.md    # Technical deep dive
-│   └── requirements.txt           # Python dependencies
-│
-└── PiZero/                         # Raspberry Pi implementation
-    ├── picam_streamrecording.py   # Main application
-    ├── stream+recordreadme.md     # Documentation
-    └── ...
+├── src/
+│   └── atn_picam/
+│       ├── core/           # Shared logic
+│       ├── jetson/         # Jetson Orin Nano implementation
+│       └── pizero/         # Raspberry Pi implementation
+├── scripts/                # Service files and setup scripts
+├── docs/                   # Documentation
+└── pyproject.toml          # Package configuration
 ```
 
-## 🚀 Quick Start
+## 🚀 Installation
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/aithon-robotics/atn_picam.git
+   cd atn_picam
+   ```
+
+2. Install the package:
+   ```bash
+   pip install -e .
+   ```
+
+## 🚀 Usage
 
 ### For Jetson Orin Nano
 ```bash
-cd jetson/
-python3 test_setup.py          # Verify hardware
-python3 jetson_stream_record.py  # Start recording
+atn-jetson-stream
 ```
-See [jetson/QUICKSTART.md](jetson/QUICKSTART.md) for details.
+See [docs/JETSON_SUMMARY.md](docs/JETSON_SUMMARY.md) for details.
 
 ### For Raspberry Pi
+Standard streaming + recording:
 ```bash
-cd PiZero/
-python3 picam_streamrecording.py
+atn-pizero-stream
+```
+
+WebRTC streaming:
+```bash
+atn-pizero-webrtc
+```
+
+Immediate recording:
+```bash
+atn-pizero-record
 ```
 
 ## 🔧 Hardware Requirements
@@ -84,5 +100,5 @@ Camera → nvarguscamerasrc → tee → [nvv4l2h264enc → file]
 
 ## 📖 Documentation
 
-- **Jetson Implementation:** See [jetson/README.md](jetson/README.md)
-- **Pi Implementation:** See `PiZero/stream+recordreadme.md`
+- **Jetson Implementation:** See [docs/JETSON_SUMMARY.md](docs/JETSON_SUMMARY.md)
+- **Pi Implementation:** See `docs/stream+recordreadme.md`

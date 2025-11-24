@@ -8,7 +8,7 @@ Raspberry Pi Camera Stream + Record Server on Raspberry Pi Zero 2W
 Compatible with Pi Camera Module 3 and picamera2
 """
 
-from flask import Flask, Response, render_template_string
+from flask import Flask, Response, render_template
 from picamera2 import Picamera2
 from picamera2.encoders import H264Encoder, MJPEGEncoder
 from picamera2.outputs import FileOutput
@@ -18,60 +18,9 @@ import time
 import psutil
 from datetime import datetime
 import os
+from atn_picam.core.storage import check_and_cleanup_storage
 
-app = Flask(__name__)
-
-# Storage management constants
-MIN_FREE_SPACE_GB = 10
-MIN_FREE_SPACE_BYTES = MIN_FREE_SPACE_GB * 1024 * 1024 * 1024
-
-def check_and_cleanup_storage(recordings_dir):
-    """
-    Check available storage space and delete oldest recordings if below threshold.
-    Maintains at least 10GB of free space.
-    """
-    # Get disk usage statistics
-    stat = os.statvfs(recordings_dir)
-    free_space_bytes = stat.f_bavail * stat.f_frsize
-    free_space_gb = free_space_bytes / (1024 * 1024 * 1024)
-    
-    if free_space_bytes >= MIN_FREE_SPACE_BYTES:
-        print(f"[Storage] Available space: {free_space_gb:.2f} GB (OK)")
-        return
-    
-    print(f"\n⚠️  WARNING: Low storage space detected!")
-    print(f"[Storage] Available: {free_space_gb:.2f} GB (threshold: {MIN_FREE_SPACE_GB} GB)")
-    print(f"[Storage] Starting cleanup of oldest recordings...")
-    
-    # Get all recording files sorted by modification time (oldest first)
-    recordings = []
-    for filename in os.listdir(recordings_dir):
-        filepath = os.path.join(recordings_dir, filename)
-        if os.path.isfile(filepath) and (filename.endswith('.mp4') or filename.endswith('.h264')):
-            recordings.append((filepath, os.path.getmtime(filepath), os.path.getsize(filepath)))
-    
-    recordings.sort(key=lambda x: x[1])  # Sort by modification time
-    
-    # Delete oldest files until we have enough space
-    deleted_count = 0
-    deleted_size_mb = 0
-    
-    for filepath, mtime, size in recordings:
-        if free_space_bytes >= MIN_FREE_SPACE_BYTES:
-            break
-        
-        try:
-            os.remove(filepath)
-            deleted_count += 1
-            deleted_size_mb += size / (1024 * 1024)
-            free_space_bytes += size
-            print(f"[Storage] Deleted: {os.path.basename(filepath)} ({size/(1024*1024):.1f} MB)")
-        except OSError as e:
-            print(f"[Storage] Failed to delete {filepath}: {e}")
-    
-    free_space_gb = free_space_bytes / (1024 * 1024 * 1024)
-    print(f"[Storage] Cleanup complete: Deleted {deleted_count} file(s) ({deleted_size_mb:.1f} MB)")
-    print(f"[Storage] Available space now: {free_space_gb:.2f} GB\n")
+app = Flask(__name__, template_folder='../templates')
 
 # Global variables
 camera = None
@@ -272,87 +221,7 @@ def generate_frames():
 @app.route('/')
 def index():
     """Serve the main web page with embedded camera stream"""
-    return render_template_string('''
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Pi Camera Stream + Record</title>
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    text-align: center;
-                    background-color: #f0f0f0;
-                    margin: 0;
-                    padding: 20px;
-                }
-                h1 {
-                    color: #333;
-                }
-                .stream-container {
-                    margin: 20px auto;
-                    max-width: 1280px;
-                    background: white;
-                    padding: 20px;
-                    border-radius: 10px;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-                }
-                img {
-                    max-width: 100%;
-                    height: auto;
-                    border: 2px solid #333;
-                    border-radius: 5px;
-                }
-                .info {
-                    margin-top: 20px;
-                    color: #666;
-                    font-size: 14px;
-                    text-align: left;
-                }
-                .recording-indicator {
-                    display: inline-block;
-                    width: 12px;
-                    height: 12px;
-                    background: #e74c3c;
-                    border-radius: 50%;
-                    animation: pulse 1.5s ease-in-out infinite;
-                    margin-right: 8px;
-                }
-                @keyframes pulse {
-                    0%, 100% { opacity: 1; }
-                    50% { opacity: 0.3; }
-                }
-                .specs {
-                    background: #ecf0f1;
-                    padding: 15px;
-                    border-radius: 5px;
-                    margin-top: 15px;
-                }
-            </style>
-        </head>
-        <body>
-            <h1><span class="recording-indicator"></span>Pi Camera Stream + Recording</h1>
-            <div class="stream-container">
-                <h2>Live Web Feed (MJPEG)</h2>
-                <img src="{{ url_for('video_feed') }}" alt="Camera Stream">
-                <div class="info">
-                    <p><strong>Web Stream:</strong> 1280x720 @ ~15fps, ~5Mbps</p>
-                    <p><strong>Status:</strong> Recording to local storage simultaneously</p>
-                    <div class="specs">
-                        <h3>Recording Specifications:</h3>
-                        <ul>
-                            <li><strong>Resolution:</strong> 1920x1080 @ 30fps</li>
-                            <li><strong>Codec:</strong> H.264 (hardware encoded)</li>
-                            <li><strong>Bitrate:</strong> 15Mbps (high quality)</li>
-                            <li><strong>Storage:</strong> Local H.264 files in recordings/</li>
-                            <li><strong>Sensor:</strong> Full 12MP capture with ISP downscaling</li>
-                        </ul>
-                        <p><em>Hardware: Optimized for minimal CPU usage</em></p>
-                    </div>
-                </div>
-            </div>
-        </body>
-        </html>
-    ''')
+    return render_template('pizero_recording.html')
 
 @app.route('/stream')
 def video_feed():
@@ -373,7 +242,7 @@ def status():
         }, 200
     return {'status': 'stopped'}, 503
 
-if __name__ == '__main__':
+def main():
     try:
         print("Initializing camera system...")
         print("=" * 60)
@@ -402,3 +271,6 @@ if __name__ == '__main__':
             camera.stop()
             camera.close()
         print("Camera closed. Goodbye!")
+
+if __name__ == '__main__':
+    main()

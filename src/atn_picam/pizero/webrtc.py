@@ -29,6 +29,7 @@ from aiohttp import web
 from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
 from aiortc.contrib.media import MediaPlayer
 import av
+from atn_picam.core.storage import check_and_cleanup_storage
 
 # Try importing Picamera2
 try:
@@ -39,48 +40,6 @@ try:
 except ImportError:
     HAVE_PICAM2 = False
     print("Warning: picamera2 not found. Will try to use standard video device if available.")
-
-# Storage management constants
-MIN_FREE_SPACE_GB = 10
-MIN_FREE_SPACE_BYTES = MIN_FREE_SPACE_GB * 1024 * 1024 * 1024
-
-def check_and_cleanup_storage(recordings_dir):
-    """
-    Check available storage space and delete oldest recordings if below threshold.
-    Maintains at least 10GB of free space.
-    """
-    try:
-        # Get disk usage statistics
-        stat = os.statvfs(recordings_dir)
-        free_space_bytes = stat.f_bavail * stat.f_frsize
-        free_space_gb = free_space_bytes / (1024 * 1024 * 1024)
-        
-        if free_space_bytes >= MIN_FREE_SPACE_BYTES:
-            return
-        
-        print(f"WARNING: Low storage space ({free_space_gb:.2f} GB). Cleaning up...")
-        
-        # Get all recording files sorted by modification time (oldest first)
-        recordings = []
-        for filename in os.listdir(recordings_dir):
-            filepath = os.path.join(recordings_dir, filename)
-            if os.path.isfile(filepath) and (filename.endswith('.mp4') or filename.endswith('.h264')):
-                recordings.append((filepath, os.path.getmtime(filepath), os.path.getsize(filepath)))
-        
-        recordings.sort(key=lambda x: x[1])
-        
-        for filepath, mtime, size in recordings:
-            if free_space_bytes >= MIN_FREE_SPACE_BYTES:
-                break
-            try:
-                os.remove(filepath)
-                free_space_bytes += size
-                print(f"Deleted: {os.path.basename(filepath)}")
-            except OSError as e:
-                print(f"Failed to delete {filepath}: {e}")
-                
-    except Exception as e:
-        print(f"Storage cleanup error: {e}")
 
 class CameraManager:
     """
@@ -201,264 +160,19 @@ class CameraManager:
 # Global camera manager instance
 camera_manager = CameraManager()
 
-# HTML content for the client
-INDEX_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>PiCam WebRTC Stream + Record</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; text-align: center; background: #f0f2f5; margin: 0; padding: 20px; }
-        .container { margin: 0 auto; padding: 20px; background: white; max-width: 1000px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h1 { color: #1a1a1a; margin-bottom: 20px; }
-        video { width: 100%; max-width: 960px; background: #000; border-radius: 8px; aspect-ratio: 16/9; }
-        .controls { margin-top: 20px; display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; }
-        button { padding: 12px 24px; font-size: 16px; font-weight: 600; cursor: pointer; border: none; border-radius: 6px; transition: background 0.2s; color: white; }
-        button:disabled { background: #ccc !important; cursor: not-allowed; }
-        
-        .btn-stream { background: #007bff; }
-        .btn-stream:hover { background: #0056b3; }
-        .btn-stop { background: #6c757d; }
-        
-        .btn-record { background: #dc3545; }
-        .btn-record:hover { background: #c82333; }
-        .btn-record.recording { animation: pulse 1.5s infinite; }
-        
-        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-        
-        #status { margin-top: 15px; color: #666; font-size: 14px; }
-        .stats { margin-top: 10px; font-size: 12px; color: #888; font-family: monospace; }
-        .storage-info { margin-top: 10px; font-size: 13px; color: #555; background: #e9ecef; padding: 8px; border-radius: 4px; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>PiCam WebRTC Stream</h1>
-        <video id="video" autoplay playsinline muted></video>
-        
-        <div class="controls">
-            <button id="startBtn" class="btn-stream" onclick="start()">Start Stream</button>
-            <button id="stopBtn" class="btn-stop" onclick="stop()" disabled>Stop Stream</button>
-            <button id="recordBtn" class="btn-record" onclick="toggleRecording()">Start Recording</button>
-        </div>
-        
-        <div id="status">Ready to connect</div>
-        <div id="storageInfo" class="storage-info">Loading storage info...</div>
-        <div id="stats" class="stats"></div>
-    </div>
+def get_template_path(filename):
+    """Get absolute path to template file"""
+    return os.path.join(os.path.dirname(os.path.dirname(__file__)), 'templates', filename)
 
-    <script>
-        const video = document.getElementById('video');
-        const status = document.getElementById('status');
-        const startBtn = document.getElementById('startBtn');
-        const stopBtn = document.getElementById('stopBtn');
-        const recordBtn = document.getElementById('recordBtn');
-        const storageDiv = document.getElementById('storageInfo');
-        const statsDiv = document.getElementById('stats');
-        
-        let pc = null;
-        let statsInterval = null;
-        let isRecording = false;
+async def index(request):
+    with open(get_template_path('webrtc_index.html'), 'r') as f:
+        content = f.read()
+    return web.Response(content_type="text/html", text=content)
 
-        async function start() {
-            startBtn.disabled = true;
-            stopBtn.disabled = false;
-            status.textContent = "Connecting...";
-            
-            const config = {
-                iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }]
-            };
-            
-            pc = new RTCPeerConnection(config);
-            
-            pc.ontrack = (evt) => {
-                status.textContent = "Stream received";
-                if (video.srcObject !== evt.streams[0]) {
-                    video.srcObject = evt.streams[0];
-                }
-            };
-            
-            pc.oniceconnectionstatechange = () => {
-                status.textContent = "Connection: " + pc.iceConnectionState;
-                if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
-                    stop();
-                }
-            };
-
-            pc.addTransceiver('video', {direction: 'recvonly'});
-            
-            try {
-                const offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-                
-                const response = await fetch('/offer', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        sdp: pc.localDescription.sdp,
-                        type: pc.localDescription.type
-                    })
-                });
-                
-                const answer = await response.json();
-                await pc.setRemoteDescription(answer);
-                
-                startStats();
-                
-            } catch (e) {
-                status.textContent = "Error: " + e;
-                console.error(e);
-                stop();
-            }
-        }
-
-        function stop() {
-            if (pc) {
-                pc.close();
-                pc = null;
-            }
-            if (statsInterval) {
-                clearInterval(statsInterval);
-                statsInterval = null;
-            }
-            video.srcObject = null;
-            startBtn.disabled = false;
-            stopBtn.disabled = true;
-            status.textContent = "Stopped";
-            statsDiv.textContent = "";
-        }
-        
-        function startStats() {
-            statsInterval = setInterval(async () => {
-                if (!pc) return;
-                const stats = await pc.getStats();
-                let statsText = "";
-                stats.forEach(report => {
-                    if (report.type === 'inbound-rtp' && report.kind === 'video') {
-                        if (report.frameWidth) {
-                            statsText = `${report.frameWidth}x${report.frameHeight} | Frames: ${report.framesDecoded}`;
-                        }
-                    }
-                });
-                if (statsText) statsDiv.textContent = statsText;
-            }, 1000);
-        }
-
-        async function toggleRecording() {
-            recordBtn.disabled = true;
-            const endpoint = isRecording ? '/stop_recording' : '/start_recording';
-            
-            try {
-                const response = await fetch(endpoint, { method: 'POST' });
-                const data = await response.json();
-                
-                if (data.success) {
-                    isRecording = !isRecording;
-                    updateRecordUI();
-                    updateStorageInfo();
-                } else {
-                    alert("Error: " + data.message);
-                }
-            } catch (e) {
-                alert("Request failed: " + e);
-            } finally {
-                recordBtn.disabled = false;
-            }
-        }
-
-        function updateRecordUI() {
-            if (isRecording) {
-                recordBtn.textContent = "Stop Recording";
-                recordBtn.classList.add("recording");
-            } else {
-                recordBtn.textContent = "Start Recording";
-                recordBtn.classList.remove("recording");
-            }
-        }
-
-        async function updateStorageInfo() {
-            try {
-                const response = await fetch('/storage_info');
-                const data = await response.json();
-                if (data.success) {
-                    storageDiv.textContent = `Storage: ${data.free_gb} GB free / ${data.total_gb} GB total`;
-                }
-            } catch (e) {
-                console.error(e);
-            }
-        }
-
-        // Initial checks
-        updateStorageInfo();
-        setInterval(updateStorageInfo, 10000);
-        
-        // Check status on load
-        fetch('/status').then(r => r.json()).then(data => {
-            isRecording = data.recording;
-            updateRecordUI();
-        });
-    </script>
-</body>
-</html>
-"""
-
-# Minimal HTML for embedding in iframes
-EMBED_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>PiCam Stream</title>
-    <style>
-        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
-        video { width: 100%; height: 100%; object-fit: contain; }
-    </style>
-</head>
-<body>
-    <video id="video" autoplay playsinline muted></video>
-    <script>
-        const video = document.getElementById('video');
-        const config = { iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }] };
-        
-        async function start() {
-            const pc = new RTCPeerConnection(config);
-            
-            pc.ontrack = (evt) => {
-                if (video.srcObject !== evt.streams[0]) {
-                    video.srcObject = evt.streams[0];
-                }
-            };
-
-            // Add transceiver to receive video only
-            pc.addTransceiver('video', {direction: 'recvonly'});
-            
-            try {
-                const offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-                
-                const response = await fetch('/offer', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        sdp: pc.localDescription.sdp,
-                        type: pc.localDescription.type
-                    })
-                });
-                
-                const answer = await response.json();
-                await pc.setRemoteDescription(answer);
-            } catch (e) {
-                console.error("Connection failed", e);
-                // Retry after 3 seconds on failure
-                setTimeout(start, 3000);
-            }
-        }
-        
-        start();
-    </script>
-</body>
-</html>
-"""
+async def embed(request):
+    with open(get_template_path('webrtc_embed.html'), 'r') as f:
+        content = f.read()
+    return web.Response(content_type="text/html", text=content)
 
 class PicameraStreamTrack(VideoStreamTrack):
     """
@@ -507,12 +221,6 @@ class PicameraStreamTrack(VideoStreamTrack):
             frame.pts = pts
             frame.time_base = time_base
             return frame
-
-async def index(request):
-    return web.Response(content_type="text/html", text=INDEX_HTML)
-
-async def embed(request):
-    return web.Response(content_type="text/html", text=EMBED_HTML)
 
 async def offer(request):
     params = await request.json()
@@ -646,7 +354,7 @@ async def on_shutdown(app):
 # Global set of peer connections
 pcs = set()
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="WebRTC Streamer for Pi Camera")
     parser.add_argument("--port", type=int, default=8080, help="Port for web server (default: 8080)")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host for web server (default: 0.0.0.0)")
@@ -670,3 +378,6 @@ if __name__ == "__main__":
 
     print(f"Starting WebRTC server at http://{args.host}:{args.port}")
     web.run_app(app, host=args.host, port=args.port)
+
+if __name__ == "__main__":
+    main()
