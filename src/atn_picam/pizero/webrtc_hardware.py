@@ -118,10 +118,10 @@ class CameraManager:
         self.picam2 = Picamera2()
         
         # Configure stream
-        # We use 1280x720 for the main H.264 stream to ensure stability on Pi Zero 2 W
-        # when doing both recording and streaming.
+        # Set to 1080p (1920x1080).
+        # This is the sweet spot for the Pi Zero 2 W hardware encoder.
         config = self.picam2.create_video_configuration(
-            main={"size": (1280, 720), "format": "YUV420"},
+            main={"size": (1920, 1080), "format": "YUV420"},
             controls={"FrameRate": 30.0}
         )
         self.picam2.configure(config)
@@ -137,7 +137,7 @@ class CameraManager:
         if self.h264_encoder is None:
             print("Starting shared H.264 encoder...")
             self.h264_encoder = H264Encoder(
-                bitrate=4000000,   # 4 Mbps (Compromise for Stream+Record)
+                bitrate=6000000,   # 6 Mbps (High quality for 1080p)
                 repeat=True,       # Required for streaming
                 iperiod=30,        # 1 keyframe/sec
                 framerate=30
