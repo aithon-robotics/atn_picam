@@ -28,9 +28,6 @@ import io
 from datetime import datetime
 
 from aiohttp import web
-from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
-from aiortc.contrib.media import MediaPlayer
-import av
 from atn_picam.core.storage import check_and_cleanup_storage
 
 # Try importing Picamera2
@@ -120,12 +117,11 @@ class CameraManager:
         print("Initializing Camera Manager...")
         self.picam2 = Picamera2()
         
-        # Configure dual streams
+        # Configure stream
         # We use 1280x720 for the main H.264 stream to ensure stability on Pi Zero 2 W
         # when doing both recording and streaming.
         config = self.picam2.create_video_configuration(
             main={"size": (1280, 720), "format": "YUV420"},
-            lores={"size": (640, 360), "format": "YUV420"},
             controls={"FrameRate": 30.0}
         )
         self.picam2.configure(config)
@@ -135,15 +131,6 @@ class CameraManager:
         # Warmup
         time.sleep(1)
         print("Camera Manager ready.")
-
-    def get_frame(self):
-        """Capture frame from lores stream for legacy aiortc (fallback)"""
-        if not self.running:
-            return None
-        try:
-            return self.picam2.capture_array("lores")
-        except Exception:
-            return None
 
     def _ensure_encoder_running(self):
         """Start the shared H.264 encoder if it's not already running"""
@@ -299,7 +286,7 @@ def get_template_path(filename):
     return os.path.join(os.path.dirname(os.path.dirname(__file__)), 'templates', filename)
 
 async def index(request):
-    with open(get_template_path('webrtc_index.html'), 'r') as f:
+    with open(get_template_path('webrtc_hardware_index.html'), 'r') as f:
         content = f.read()
     return web.Response(content_type="text/html", text=content)
 
@@ -307,99 +294,6 @@ async def embed(request):
     with open(get_template_path('webrtc_embed.html'), 'r') as f:
         content = f.read()
     return web.Response(content_type="text/html", text=content)
-
-class PicameraStreamTrack(VideoStreamTrack):
-    """
-    A custom VideoStreamTrack that captures frames from the global CameraManager.
-    """
-    def __init__(self):
-        super().__init__()
-        self.resolution = (960, 540) # Matches 'lores' config (qHD)
-
-    async def recv(self):
-        """
-        Called by aiortc to get the next frame.
-        """
-        pts, time_base = await self.next_timestamp()
-        
-        if not camera_manager or not camera_manager.running:
-            # Return a black frame if camera not ready
-            frame = av.VideoFrame(width=self.resolution[0], height=self.resolution[1], format='yuv420p')
-            for plane in frame.planes:
-                plane.update(bytes(plane.buffer_size))
-            frame.pts = pts
-            frame.time_base = time_base
-            return frame
-
-        # Capture frame from CameraManager
-        loop = asyncio.get_running_loop()
-        
-        try:
-            # Run capture in executor to avoid blocking asyncio loop
-            img = await loop.run_in_executor(None, camera_manager.get_frame)
-            
-            if img is None:
-                raise Exception("No frame captured")
-
-            # Create VideoFrame from numpy array
-            # picamera2 returns YUV420 as a stacked array (Y + U + V) which matches yuv420p
-            frame = av.VideoFrame.from_ndarray(img, format="yuv420p")
-            frame.pts = pts
-            frame.time_base = time_base
-            return frame
-            
-        except Exception as e:
-            # print(f"Error capturing frame: {e}")
-            # Return black frame on error
-            frame = av.VideoFrame(width=self.resolution[0], height=self.resolution[1], format='yuv420p')
-            frame.pts = pts
-            frame.time_base = time_base
-            return frame
-
-async def offer(request):
-    params = await request.json()
-    offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
-
-    pc = RTCPeerConnection()
-    pcs.add(pc)
-
-    @pc.on("connectionstatechange")
-    async def on_connectionstatechange():
-        print(f"Connection state is {pc.connectionState}")
-        if pc.connectionState == "failed":
-            await pc.close()
-            pcs.discard(pc)
-        elif pc.connectionState == "closed":
-            pcs.discard(pc)
-
-    # Create and add the video track
-    # Note: We create a new track for each connection. 
-    # For a real broadcast, we might want to share the capture source.
-    try:
-        if HAVE_PICAM2:
-            # Create track that uses the global camera manager
-            video_track = PicameraStreamTrack()
-            pc.addTrack(video_track)
-        else:
-            # Fallback to test pattern or standard device if picam2 missing
-            print("Using fallback MediaPlayer (test pattern)")
-            # options = {"video_size": "640x480"}
-            # player = MediaPlayer("/dev/video0", format="v4l2", options=options)
-            # pc.addTrack(player.video)
-            pass
-            
-    except Exception as e:
-        print(f"Failed to create video track: {e}")
-        return web.Response(status=500, text=str(e))
-
-    await pc.setRemoteDescription(offer)
-    answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
-
-    return web.json_response({
-        "sdp": pc.localDescription.sdp,
-        "type": pc.localDescription.type
-    })
 
 async def start_streaming(request):
     result = camera_manager.start_streaming()
@@ -484,17 +378,9 @@ async def on_shutdown(app):
         except asyncio.CancelledError:
             pass
 
-    # Close all peer connections
-    coros = [pc.close() for pc in pcs]
-    await asyncio.gather(*coros)
-    pcs.clear()
-    
     # Close camera
     if camera_manager:
         camera_manager.close()
-
-# Global set of peer connections
-pcs = set()
 
 def main():
     parser = argparse.ArgumentParser(description="WebRTC Streamer for Pi Camera")
@@ -510,7 +396,6 @@ def main():
     app.on_shutdown.append(on_shutdown)
     app.router.add_get("/", index)
     app.router.add_get("/embed", embed)
-    app.router.add_post("/offer", offer)
     
     # Add recording and streaming API routes
     app.router.add_post("/start_streaming", start_streaming)
