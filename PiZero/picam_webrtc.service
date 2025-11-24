@@ -1,0 +1,15 @@
+[Unit]
+Description=PiCam WebRTC Streamer
+After=network.target video.target
+
+[Service]
+Type=simple
+User=atn
+WorkingDirectory=/home/atn/aithon_code/atn_picam/PiZero
+ExecStart=/home/atn/aithon_code/atn_picam/PiZero/venv/bin/python3 picam_webrtc_ondemand_record.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
