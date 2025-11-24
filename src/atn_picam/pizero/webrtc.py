@@ -23,6 +23,7 @@ import platform
 import time
 import uuid
 import psutil
+import subprocess
 from datetime import datetime
 
 from aiohttp import web
@@ -41,6 +42,32 @@ except ImportError:
     HAVE_PICAM2 = False
     print("Warning: picamera2 not found. Will try to use standard video device if available.")
 
+class PipeOutput:
+    """
+    Output class that pipes data to a subprocess (e.g. ffmpeg).
+    """
+    def __init__(self, command):
+        print(f"Starting subprocess: {' '.join(command)}")
+        self.proc = subprocess.Popen(command, stdin=subprocess.PIPE)
+
+    def write(self, data):
+        if self.proc.poll() is None:
+            try:
+                self.proc.stdin.write(data)
+                return len(data)
+            except Exception as e:
+                print(f"PipeOutput write error: {e}")
+        return 0
+
+    def close(self):
+        if self.proc.stdin:
+            self.proc.stdin.close()
+        self.proc.wait()
+    
+    def flush(self):
+        if self.proc.stdin:
+            self.proc.stdin.flush()
+
 class CameraManager:
     """
     Singleton class to manage the Picamera2 instance.
@@ -53,6 +80,7 @@ class CameraManager:
         self.recording_active = False
         self.current_recording_file = None
         self.h264_encoder = None
+        self.output = None
         self.running = False
         
         if HAVE_PICAM2:
@@ -98,17 +126,31 @@ class CameraManager:
             check_and_cleanup_storage(recordings_dir)
             
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = os.path.join(recordings_dir, f"webrtc_{timestamp}.h264")
+            filename = os.path.join(recordings_dir, f"webrtc_{timestamp}.mp4")
             
             # Create H.264 encoder attached to the MAIN (high-res) stream
+            # Lower bitrate to 5Mbps to avoid SD card bottlenecks on Pi Zero 2W
             self.h264_encoder = H264Encoder(
-                bitrate=20000000, # 20 Mbps (Higher quality)
+                bitrate=5000000, # 5 Mbps
                 repeat=True,
                 iperiod=24, # Match framerate
                 framerate=24
             )
             
-            self.picam2.start_encoder(self.h264_encoder, FileOutput(filename), name="main")
+            # Use ffmpeg to mux H.264 stream into MP4 container
+            cmd = [
+                'ffmpeg',
+                '-f', 'h264',
+                '-framerate', '24',
+                '-i', '-',       # Read from stdin
+                '-c:v', 'copy',  # Copy video stream (no re-encoding)
+                '-f', 'mp4',
+                '-y',            # Overwrite if exists
+                filename
+            ]
+            
+            self.output = PipeOutput(cmd)
+            self.picam2.start_encoder(self.h264_encoder, self.output, name="main")
             
             self.recording_active = True
             self.current_recording_file = filename
@@ -119,6 +161,9 @@ class CameraManager:
             print(f"Start recording failed: {e}")
             self.recording_active = False
             self.h264_encoder = None
+            if self.output:
+                self.output.close()
+                self.output = None
             return {"success": False, "message": str(e)}
 
     def stop_recording(self):
@@ -131,6 +176,10 @@ class CameraManager:
                 self.picam2.stop_encoder(self.h264_encoder)
                 self.h264_encoder = None
             
+            if self.output:
+                self.output.close()
+                self.output = None
+            
             self.recording_active = False
             self.current_recording_file = None
             print(f"Stopped recording: {filename}")
@@ -140,6 +189,9 @@ class CameraManager:
             print(f"Stop recording failed: {e}")
             self.recording_active = False
             self.h264_encoder = None
+            if self.output:
+                self.output.close()
+                self.output = None
             return {"success": False, "message": str(e)}
 
     def get_status(self):
