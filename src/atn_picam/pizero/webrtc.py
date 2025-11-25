@@ -32,6 +32,24 @@ from aiortc.contrib.media import MediaPlayer
 import av
 from atn_picam.core.storage import check_and_cleanup_storage
 
+# CORS middleware to allow cross-origin requests
+@web.middleware
+async def cors_middleware(request, handler):
+    """Add CORS headers to all responses"""
+    if request.method == 'OPTIONS':
+        # Handle preflight requests
+        response = web.Response()
+    else:
+        response = await handler(request)
+    
+    # Add CORS headers
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    response.headers['Access-Control-Max-Age'] = '3600'
+    
+    return response
+
 # Try importing Picamera2
 try:
     from picamera2 import Picamera2
@@ -469,7 +487,8 @@ def main():
     # Setup logging
     logging.basicConfig(level=logging.INFO)
 
-    app = web.Application()
+    # Create app with CORS middleware
+    app = web.Application(middlewares=[cors_middleware])
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     app.router.add_get("/", index)
