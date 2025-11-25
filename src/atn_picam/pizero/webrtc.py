@@ -36,19 +36,27 @@ from atn_picam.core.storage import check_and_cleanup_storage
 try:
     from picamera2 import Picamera2
     from picamera2.encoders import H264Encoder
-    from picamera2.outputs import FileOutput
+    from picamera2.outputs import FileOutput, Output
     HAVE_PICAM2 = True
 except ImportError:
     HAVE_PICAM2 = False
+    Output = object  # Fallback
     print("Warning: picamera2 not found. Will try to use standard video device if available.")
 
-class PipeOutput:
+class PipeOutput(Output if HAVE_PICAM2 else object):
     """
     Output class that pipes data to a subprocess (e.g. ffmpeg).
+    Must inherit from picamera2.outputs.Output for compatibility.
     """
     def __init__(self, command):
+        if HAVE_PICAM2:
+            super().__init__()
         print(f"Starting subprocess: {' '.join(command)}")
         self.proc = subprocess.Popen(command, stdin=subprocess.PIPE)
+
+    def outputframe(self, frame, keyframe=True, timestamp=None, packet=None, audio=None):
+        """Called by picamera2 encoder - writes frame data to subprocess"""
+        return self.write(frame)
 
     def write(self, data):
         if self.proc.poll() is None:
@@ -143,8 +151,10 @@ class CameraManager:
                 '-f', 'h264',
                 '-framerate', '24',
                 '-i', '-',       # Read from stdin
+                '-fflags', '+genpts',  # Generate presentation timestamps
                 '-c:v', 'copy',  # Copy video stream (no re-encoding)
                 '-f', 'mp4',
+                '-movflags', '+faststart',  # Optimize for web playback
                 '-y',            # Overwrite if exists
                 filename
             ]
@@ -195,6 +205,29 @@ class CameraManager:
             return {"success": False, "message": str(e)}
 
     def get_status(self):
+        # Check if recording is actually active
+        if self.recording_active:
+            # Verify encoder and output are still valid
+            if self.h264_encoder is None or self.output is None:
+                # Cleanup orphaned recording state
+                print("Detected orphaned recording state, cleaning up...")
+                self.recording_active = False
+                self.current_recording_file = None
+                if self.output:
+                    try:
+                        self.output.close()
+                    except:
+                        pass
+                    self.output = None
+                self.h264_encoder = None
+            elif self.output and hasattr(self.output, 'proc') and self.output.proc.poll() is not None:
+                # ffmpeg process has died
+                print("Recording process terminated unexpectedly, cleaning up...")
+                self.recording_active = False
+                self.current_recording_file = None
+                self.output = None
+                self.h264_encoder = None
+        
         return {
             "running": self.running,
             "recording": self.recording_active,
@@ -347,6 +380,27 @@ async def storage_info(request):
 async def status(request):
     return web.json_response(camera_manager.get_status())
 
+async def reset_recording_state(request):
+    """Force reset recording state (emergency cleanup)"""
+    try:
+        if camera_manager.recording_active:
+            camera_manager.stop_recording()
+        else:
+            # Force cleanup even if not marked as active
+            camera_manager.recording_active = False
+            camera_manager.current_recording_file = None
+            if camera_manager.output:
+                try:
+                    camera_manager.output.close()
+                except:
+                    pass
+                camera_manager.output = None
+            camera_manager.h264_encoder = None
+        
+        return web.json_response({"success": True, "message": "Recording state reset"})
+    except Exception as e:
+        return web.json_response({"success": False, "message": str(e)})
+
 async def monitor_loop():
     """Background task to monitor CPU and Network usage"""
     process = psutil.Process()
@@ -427,6 +481,7 @@ def main():
     app.router.add_post("/stop_recording", stop_recording)
     app.router.add_get("/storage_info", storage_info)
     app.router.add_get("/status", status)
+    app.router.add_post("/reset_recording", reset_recording_state)
 
     print(f"Starting WebRTC server at http://{args.host}:{args.port}")
     web.run_app(app, host=args.host, port=args.port)

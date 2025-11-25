@@ -36,6 +36,7 @@
             <button id="startBtn" class="btn-stream" onclick="start()">Start Stream</button>
             <button id="stopBtn" class="btn-stop" onclick="stop()" disabled>Stop Stream</button>
             <button id="recordBtn" class="btn-record" onclick="toggleRecording()">Start Recording</button>
+            <button id="resetBtn" class="btn-stop" onclick="resetRecording()" style="font-size: 14px; padding: 8px 16px;">Reset Recording</button>
         </div>
         
         <div id="status">Ready to connect</div>
@@ -154,11 +155,42 @@
                     updateStorageInfo();
                 } else {
                     alert("Error: " + data.message);
+                    // Refresh status to check actual state
+                    await checkStatus();
                 }
             } catch (e) {
                 alert("Request failed: " + e);
             } finally {
                 recordBtn.disabled = false;
+            }
+        }
+
+        async function resetRecording() {
+            if (!confirm("Force reset recording state?")) return;
+            
+            try {
+                const response = await fetch('/reset_recording', { method: 'POST' });
+                const data = await response.json();
+                
+                if (data.success) {
+                    alert("Recording state reset successfully");
+                    await checkStatus();
+                } else {
+                    alert("Reset failed: " + data.message);
+                }
+            } catch (e) {
+                alert("Request failed: " + e);
+            }
+        }
+
+        async function checkStatus() {
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+                isRecording = data.recording;
+                updateRecordUI();
+            } catch (e) {
+                console.error("Failed to check status:", e);
             }
         }
 
@@ -189,10 +221,7 @@
         setInterval(updateStorageInfo, 10000);
         
         // Check status on load
-        fetch('/status').then(r => r.json()).then(data => {
-            isRecording = data.recording;
-            updateRecordUI();
-        });
+        checkStatus();
     </script>
 </body>
 </html>
