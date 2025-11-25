@@ -30,7 +30,7 @@ This project provides simultaneous high-quality video recording and web streamin
 
 2.  **Create a virtual environment (Recommended):**
     ```bash
-    python3 -m venv venv
+    python3 -m venv venv --system-site-packages
     source venv/bin/activate
     ```
 
@@ -49,7 +49,7 @@ The package installs several command-line tools for easy access.
     ```bash
     atn-pizero-stream
     ```
-    *   Access at `http://<pi-ip>:5000`
+    *   Access at `http://<pi-ip>:8080`
     *   Records to `~/recordings/`
 
 *   **WebRTC Streaming (Low Latency):**
@@ -57,11 +57,7 @@ The package installs several command-line tools for easy access.
     atn-pizero-webrtc
     ```
     *   Access at `http://<pi-ip>:8080`
-
-*   **Standalone Recording:**
-    ```bash
-    atn-pizero-record
-    ```
+    *   Records to `~/recordings/`
 
 ### 🟢 NVIDIA Jetson
 
@@ -103,6 +99,7 @@ To make the camera start automatically on boot, use the provided scripts.
     sudo systemctl status <service_name>
     sudo systemctl stop <service_name>
     sudo systemctl restart <service_name>
+    sudo sysetmctl disable <service_name>
     ```
 
 ## 🔧 Architecture & Implementation
