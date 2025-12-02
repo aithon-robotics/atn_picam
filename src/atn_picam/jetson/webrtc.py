@@ -95,7 +95,7 @@ class JetsonCameraManager:
             "t. ! queue max-size-buffers=1 leaky=downstream ! "
             "nvvidconv ! "
             "video/x-raw(memory:NVMM), width=960, height=540, format=NV12 ! "
-            "nvv4l2h264enc name=webrtc_enc maxperf-enable=1 bitrate=3000000 iframeinterval=30 ! "
+            "nvv4l2h264enc name=webrtc_enc maxperf-enable=1 bitrate=3000000 iframeinterval=30 insert-sps-pps=true insert-vui=true !"
             "video/x-h264, stream-format=byte-stream ! "
             "h264parse ! "
             "appsink name=appsink emit-signals=true max-buffers=1 drop=true"
@@ -320,6 +320,7 @@ class JetsonStreamTrack(VideoStreamTrack):
         self.height = 540
         self.codec = None
         self._start = None
+        self.last_frame = None
 
     async def recv(self):
         """
@@ -335,8 +336,10 @@ class JetsonStreamTrack(VideoStreamTrack):
         # Initialize codec on first call
         if self.codec is None:
             self.codec = av.CodecContext.create("h264", "r")
-            self.codec.width = self.width
-            self.codec.height = self.height
+            # Don't set width/height - let decoder figure it out from stream
+            # Enable error concealment
+            self.codec.options = {'flags': 'low_delay'}
+            self.codec.open()
 
         # Get H.264 packet from camera manager
         packet_info = None
@@ -347,7 +350,12 @@ class JetsonStreamTrack(VideoStreamTrack):
             await asyncio.sleep(0.01)
 
         if packet_info is None:
-            # Return black frame if no data
+            # Return last good frame or black frame if no data
+            if self.last_frame:
+                self.last_frame.pts = pts
+                self.last_frame.time_base = time_base
+                return self.last_frame
+
             frame = av.VideoFrame(width=self.width, height=self.height, format="yuv420p")
             for plane in frame.planes:
                 plane.update(bytes(plane.buffer_size))
@@ -359,6 +367,8 @@ class JetsonStreamTrack(VideoStreamTrack):
         try:
             h264_data = packet_info['data']
             packet = av.Packet(h264_data)
+            packet.pts = packet_info['pts']
+            packet.dts = packet_info['pts']
 
             frames = self.codec.decode(packet)
 
@@ -367,10 +377,16 @@ class JetsonStreamTrack(VideoStreamTrack):
                 decoded_frame = frames[0]
                 decoded_frame.pts = pts
                 decoded_frame.time_base = time_base
+                self.last_frame = decoded_frame  # Cache for next time
                 return decoded_frame
             else:
-                # No frame decoded (might be B-frame or incomplete)
-                # Return previous frame or black frame
+                # No frame decoded yet (might need more data or be waiting for keyframe)
+                # Return last good frame or black frame
+                if self.last_frame:
+                    self.last_frame.pts = pts
+                    self.last_frame.time_base = time_base
+                    return self.last_frame
+
                 frame = av.VideoFrame(width=self.width, height=self.height, format="yuv420p")
                 for plane in frame.planes:
                     plane.update(bytes(plane.buffer_size))
@@ -378,9 +394,31 @@ class JetsonStreamTrack(VideoStreamTrack):
                 frame.time_base = time_base
                 return frame
 
+        except av.InvalidDataError as e:
+            # Invalid H.264 data - likely waiting for keyframe (SPS/PPS)
+            # Silently return last good frame or black frame
+            if self.last_frame:
+                self.last_frame.pts = pts
+                self.last_frame.time_base = time_base
+                return self.last_frame
+
+            frame = av.VideoFrame(width=self.width, height=self.height, format="yuv420p")
+            for plane in frame.planes:
+                plane.update(bytes(plane.buffer_size))
+            frame.pts = pts
+            frame.time_base = time_base
+            return frame
         except Exception as e:
-            print(f"Error decoding H.264 packet: {e}")
-            # Return black frame on error
+            # Other errors - log once and return black frame
+            if not hasattr(self, '_error_logged'):
+                print(f"Error decoding H.264 packet: {e}")
+                self._error_logged = True
+
+            if self.last_frame:
+                self.last_frame.pts = pts
+                self.last_frame.time_base = time_base
+                return self.last_frame
+
             frame = av.VideoFrame(width=self.width, height=self.height, format="yuv420p")
             for plane in frame.planes:
                 plane.update(bytes(plane.buffer_size))
