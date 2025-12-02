@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>PiCam WebRTC Stream + Record</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; text-align: center; background: #f0f2f5; margin: 0; padding: 20px; }
+        .container { margin: 0 auto; padding: 20px; background: white; max-width: 1000px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #1a1a1a; margin-bottom: 20px; }
+        video { width: 100%; max-width: 960px; background: #000; border-radius: 8px; aspect-ratio: 16/9; }
+        .controls { margin-top: 20px; display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; }
+        button { padding: 12px 24px; font-size: 16px; font-weight: 600; cursor: pointer; border: none; border-radius: 6px; transition: background 0.2s; color: white; }
+        button:disabled { background: #ccc !important; cursor: not-allowed; }
+        
+        .btn-stream { background: #007bff; }
+        .btn-stream:hover { background: #0056b3; }
+        .btn-stop { background: #6c757d; }
+        
+        .btn-record { background: #dc3545; }
+        .btn-record:hover { background: #c82333; }
+        .btn-record.recording { animation: pulse 1.5s infinite; }
+        
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+        
+        #status { margin-top: 15px; color: #666; font-size: 14px; }
+        .stats { margin-top: 10px; font-size: 12px; color: #888; font-family: monospace; }
+        .storage-info { margin-top: 10px; font-size: 13px; color: #555; background: #e9ecef; padding: 8px; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>PiCam WebRTC Stream</h1>
+        <video id="video" autoplay playsinline muted></video>
+        
+        <div class="controls">
+            <button id="startBtn" class="btn-stream" onclick="start()">Start Stream</button>
+            <button id="stopBtn" class="btn-stop" onclick="stop()" disabled>Stop Stream</button>
+            <button id="recordBtn" class="btn-record" onclick="toggleRecording()">Start Recording</button>
+            <button id="resetBtn" class="btn-stop" onclick="resetRecording()" style="font-size: 14px; padding: 8px 16px;">Reset Recording</button>
+        </div>
+        
+        <div id="status">Ready to connect</div>
+        <div id="storageInfo" class="storage-info">Loading storage info...</div>
+        <div id="stats" class="stats"></div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const status = document.getElementById('status');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const recordBtn = document.getElementById('recordBtn');
+        const storageDiv = document.getElementById('storageInfo');
+        const statsDiv = document.getElementById('stats');
+        
+        let pc = null;
+        let statsInterval = null;
+        let isRecording = false;
+
+        async function start() {
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            status.textContent = "Connecting...";
+            
+            const config = {
+                iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }]
+            };
+            
+            pc = new RTCPeerConnection(config);
+            
+            pc.ontrack = (evt) => {
+                status.textContent = "Stream received";
+                if (video.srcObject !== evt.streams[0]) {
+                    video.srcObject = evt.streams[0];
+                }
+            };
+            
+            pc.oniceconnectionstatechange = () => {
+                status.textContent = "Connection: " + pc.iceConnectionState;
+                if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+                    stop();
+                }
+            };
+
+            pc.addTransceiver('video', {direction: 'recvonly'});
+            
+            try {
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                
+                const response = await fetch('/offer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sdp: pc.localDescription.sdp,
+                        type: pc.localDescription.type
+                    })
+                });
+                
+                const answer = await response.json();
+                await pc.setRemoteDescription(answer);
+                
+                startStats();
+                
+            } catch (e) {
+                status.textContent = "Error: " + e;
+                console.error(e);
+                stop();
+            }
+        }
+
+        function stop() {
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+            if (statsInterval) {
+                clearInterval(statsInterval);
+                statsInterval = null;
+            }
+            video.srcObject = null;
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            status.textContent = "Stopped";
+            statsDiv.textContent = "";
+        }
+        
+        function startStats() {
+            statsInterval = setInterval(async () => {
+                if (!pc) return;
+                const stats = await pc.getStats();
+                let statsText = "";
+                stats.forEach(report => {
+                    if (report.type === 'inbound-rtp' && report.kind === 'video') {
+                        if (report.frameWidth) {
+                            statsText = `${report.frameWidth}x${report.frameHeight} | Frames: ${report.framesDecoded}`;
+                        }
+                    }
+                });
+                if (statsText) statsDiv.textContent = statsText;
+            }, 1000);
+        }
+
+        async function toggleRecording() {
+            recordBtn.disabled = true;
+            const endpoint = isRecording ? '/stop_recording' : '/start_recording';
+            
+            try {
+                const response = await fetch(endpoint, { method: 'POST' });
+                const data = await response.json();
+                
+                if (data.success) {
+                    isRecording = !isRecording;
+                    updateRecordUI();
+                    updateStorageInfo();
+                } else {
+                    alert("Error: " + data.message);
+                    // Refresh status to check actual state
+                    await checkStatus();
+                }
+            } catch (e) {
+                alert("Request failed: " + e);
+            } finally {
+                recordBtn.disabled = false;
+            }
+        }
+
+        async function resetRecording() {
+            if (!confirm("Force reset recording state?")) return;
+            
+            try {
+                const response = await fetch('/reset_recording', { method: 'POST' });
+                const data = await response.json();
+                
+                if (data.success) {
+                    alert("Recording state reset successfully");
+                    await checkStatus();
+                } else {
+                    alert("Reset failed: " + data.message);
+                }
+            } catch (e) {
+                alert("Request failed: " + e);
+            }
+        }
+
+        async function checkStatus() {
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+                isRecording = data.recording;
+                updateRecordUI();
+            } catch (e) {
+                console.error("Failed to check status:", e);
+            }
+        }
+
+        function updateRecordUI() {
+            if (isRecording) {
+                recordBtn.textContent = "Stop Recording";
+                recordBtn.classList.add("recording");
+            } else {
+                recordBtn.textContent = "Start Recording";
+                recordBtn.classList.remove("recording");
+            }
+        }
+
+        async function updateStorageInfo() {
+            try {
+                const response = await fetch('/storage_info');
+                const data = await response.json();
+                if (data.success) {
+                    storageDiv.textContent = `Storage: ${data.free_gb} GB free / ${data.total_gb} GB total`;
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        // Initial checks
+        updateStorageInfo();
+        setInterval(updateStorageInfo, 10000);
+        
+        // Check status on load
+        checkStatus();
+    </script>
+</body>
+</html>
