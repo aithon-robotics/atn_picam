@@ -34,6 +34,7 @@ pizero = [
 atn-jetson-stream = "atn_picam.jetson.stream:main"
 atn-pizero-stream = "atn_picam.pizero.stream:main"
 atn-pizero-webrtc = "atn_picam.pizero.webrtc:main"
+atn-jetson-webrtc = "atn_picam.jetson.webrtc:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
