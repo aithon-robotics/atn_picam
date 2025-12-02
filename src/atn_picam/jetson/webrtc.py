@@ -113,7 +113,18 @@ class JetsonCameraManager:
 
     def start(self):
         if self.pipeline:
-            self.pipeline.set_state(Gst.State.PLAYING)
+            ret = self.pipeline.set_state(Gst.State.PLAYING)
+            if ret == Gst.StateChangeReturn.FAILURE:
+                print("Error: Failed to set pipeline to PLAYING state. Check if nvargus-daemon is running.")
+                return
+
+            # Wait for state change to complete or fail
+            ret, state, pending = self.pipeline.get_state(5 * Gst.SECOND)
+            if ret == Gst.StateChangeReturn.FAILURE:
+                print("Error: Pipeline failed to start (async failure). Check nvargus-daemon.")
+                self.pipeline.set_state(Gst.State.NULL)
+                return
+            
             self.running = True
             # GStreamer requires a GLib MainLoop for bus messages and some elements
             self.thread = threading.Thread(target=self._run_glib_loop, daemon=True)
@@ -122,7 +133,10 @@ class JetsonCameraManager:
 
     def _run_glib_loop(self):
         self.loop = GLib.MainLoop()
-        self.loop.run()
+        try:
+            self.loop.run()
+        except Exception as e:
+            print(f"GLib loop error: {e}")
 
     def _on_new_sample(self, sink):
         """Callback for appsink to retrieve raw frames for WebRTC"""
@@ -150,9 +164,11 @@ class JetsonCameraManager:
         t = message.type
         if t == Gst.MessageType.EOS:
             print("End of Stream")
+            self.close()
         elif t == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
             print(f"Error: {err}, {debug}")
+            self.close()
 
     def get_frame(self):
         """Get the latest raw frame data"""
