@@ -115,21 +115,33 @@ class CameraManager:
     def _init_camera(self):
         print("Initializing Camera Manager...")
         self.picam2 = Picamera2()
-        
+
         # Configure dual streams
         # Camera Module 3 (IMX708) is native 16:9 (4608x2592)
-        # We use 16:9 for both streams to avoid cropping/distortion
+        # IMPORTANT: Explicitly specify full sensor output to prevent auto-cropping/zoom
         config = self.picam2.create_video_configuration(
             main={"size": (1920, 1080), "format": "YUV420"},  # High quality for recording
             lores={"size": (960, 540), "format": "YUV420"},   # Low res for WebRTC (qHD)
-            controls={"FrameRate": 24.0}
+            raw={"size": (4608, 2592)},  # Full sensor capture
+            sensor={"output_size": (4608, 2592), "bit_depth": 10}  # Prevent sensor cropping
         )
         self.picam2.configure(config)
+
+        # Set ScalerCrop to use FULL sensor area (prevents zoom/crop)
+        self.picam2.set_controls({
+            "FrameRate": 24.0,
+            "ScalerCrop": (0, 0, 4608, 2592)  # Full sensor area - no cropping
+        })
+
         self.picam2.start()
         self.running = True
-        
-        # Warmup
-        time.sleep(1)
+
+        # Warmup and re-apply ScalerCrop to ensure it takes effect
+        time.sleep(0.1)
+        self.picam2.set_controls({
+            "ScalerCrop": (0, 0, 4608, 2592)  # Full sensor area
+        })
+        time.sleep(0.9)
         print("Camera Manager ready.")
 
     def get_frame(self):
