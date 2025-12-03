@@ -117,20 +117,23 @@ class CameraManager:
         self.picam2 = Picamera2()
 
         # Configure dual streams
-        # Camera Module 3 (IMX708) is native 16:9 (4608x2592)
-        # IMPORTANT: Explicitly specify full sensor output to prevent auto-cropping/zoom
+        # Camera Module 2 (IMX219) sensor modes:
+        # - 3280×2464 @ 21 fps (max resolution, too slow for 30fps)
+        # - 1640×1232 @ 41 fps (2×2 binned, full FOV, supports 30fps)
+        # - 1920×1080 @ 47 fps (cropped FOV)
+        # IMPORTANT: Use 1640×1232 for full FOV at 30fps
         config = self.picam2.create_video_configuration(
             main={"size": (1920, 1080), "format": "YUV420"},  # High quality for recording
             lores={"size": (960, 540), "format": "YUV420"},   # Low res for WebRTC (qHD)
-            raw={"size": (4608, 2592)},  # Full sensor capture
-            sensor={"output_size": (4608, 2592), "bit_depth": 10}  # Prevent sensor cropping
+            raw={"size": (1640, 1232)},  # 2×2 binned mode, full FOV @ 41fps
+            sensor={"output_size": (1640, 1232), "bit_depth": 10}  # Prevent sensor cropping
         )
         self.picam2.configure(config)
 
         # Set ScalerCrop to use FULL sensor area (prevents zoom/crop)
         self.picam2.set_controls({
-            "FrameRate": 24.0,
-            "ScalerCrop": (0, 0, 4608, 2592)  # Full sensor area - no cropping
+            "FrameRate": 30.0,
+            "ScalerCrop": (0, 0, 1640, 1232)  # Full binned sensor area
         })
 
         self.picam2.start()
@@ -139,7 +142,7 @@ class CameraManager:
         # Warmup and re-apply ScalerCrop to ensure it takes effect
         time.sleep(0.1)
         self.picam2.set_controls({
-            "ScalerCrop": (0, 0, 4608, 2592)  # Full sensor area
+            "ScalerCrop": (0, 0, 1640, 1232)  # Full sensor area - no cropping
         })
         time.sleep(0.9)
         print("Camera Manager ready.")
@@ -171,15 +174,15 @@ class CameraManager:
             self.h264_encoder = H264Encoder(
                 bitrate=5000000, # 5 Mbps
                 repeat=True,
-                iperiod=24, # Match framerate
-                framerate=24
+                iperiod=30, # Match framerate
+                framerate=30
             )
             
             # Use ffmpeg to mux H.264 stream into MP4 container
             cmd = [
                 'ffmpeg',
                 '-f', 'h264',
-                '-framerate', '24',
+                '-framerate', '30',
                 '-i', '-',       # Read from stdin
                 '-fflags', '+genpts',  # Generate presentation timestamps
                 '-c:v', 'copy',  # Copy video stream (no re-encoding)
