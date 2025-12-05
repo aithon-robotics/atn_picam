@@ -117,23 +117,24 @@ class CameraManager:
         self.picam2 = Picamera2()
 
         # Configure dual streams
-        # Camera Module 2 (IMX219) sensor modes:
-        # - 3280×2464 @ 21 fps (max resolution, too slow for 30fps)
-        # - 1640×1232 @ 41 fps (2×2 binned, full FOV, supports 30fps)
-        # - 1920×1080 @ 47 fps (cropped FOV)
-        # IMPORTANT: Use 1640×1232 for full FOV at 30fps
+        # Camera Module 3 (IMX708) sensor modes:
+        # - 4608×2592 @ 14 fps (max resolution, too slow)
+        # - 2304×1296 @ 56 fps (2×2 binned, full FOV, supports 30fps)
+        # - 1536×864 @ 120 fps (cropped FOV)
+        # IMPORTANT: Use 2304×1296 for full FOV at 30fps
         config = self.picam2.create_video_configuration(
             main={"size": (1920, 1080), "format": "YUV420"},  # High quality for recording
             lores={"size": (960, 540), "format": "YUV420"},   # Low res for WebRTC (qHD)
-            raw={"size": (1640, 1232)},  # 2×2 binned mode, full FOV @ 41fps
-            sensor={"output_size": (1640, 1232), "bit_depth": 10}  # Prevent sensor cropping
+            raw={"size": (2304, 1296)},  # 2×2 binned mode, full FOV @ 56fps
+            sensor={"output_size": (2304, 1296), "bit_depth": 10}  # Prevent sensor cropping
         )
         self.picam2.configure(config)
 
         # Set ScalerCrop to use FULL sensor area (prevents zoom/crop)
+        # IMX708 full active area is 4608x2592
         self.picam2.set_controls({
             "FrameRate": 30.0,
-            "ScalerCrop": (0, 0, 1640, 1232)  # Full binned sensor area
+            "ScalerCrop": (0, 0, 4608, 2592)  # Full sensor area
         })
 
         self.picam2.start()
@@ -142,7 +143,7 @@ class CameraManager:
         # Warmup and re-apply ScalerCrop to ensure it takes effect
         time.sleep(0.1)
         self.picam2.set_controls({
-            "ScalerCrop": (0, 0, 1640, 1232)  # Full sensor area - no cropping
+            "ScalerCrop": (0, 0, 4608, 2592)  # Full sensor area - no cropping
         })
         time.sleep(0.9)
         print("Camera Manager ready.")
