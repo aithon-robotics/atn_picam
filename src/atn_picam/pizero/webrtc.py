@@ -226,6 +226,7 @@ class CameraManager:
                 '-framerate', '30',
                 '-i', '-',       # Read from stdin
                 '-fflags', '+genpts',  # Generate presentation timestamps
+                '-use_wallclock_as_timestamps', '1',  # Use system time for timestamps
                 '-c:v', 'copy',  # Copy video stream (no re-encoding)
                 '-f', 'mp4',
                 '-movflags', '+faststart',  # Optimize for web playback
