@@ -79,25 +79,22 @@ class JetsonCameraManager:
         self._init_pipeline()
 
     def _init_pipeline(self):
-        print("Initializing Jetson Camera Pipeline with Hardware H.264 Encoding...")
+        print("Initializing Jetson Camera Pipeline with Raw Frame Output...")
 
-        # Main pipeline: Source -> Tee -> WebRTC Branch (H.264 encoded)
-        # WebRTC branch now uses hardware H.264 encoding at 960x540 @ 3Mbps
+        # Main pipeline: Source -> Tee -> WebRTC Branch (Raw frames)
+        # WebRTC branch now outputs RAW YUV420 frames at 960x540 (no H.264 encoding)
         # Recording branch (dynamically added) uses H.264 at 1920x1080 @ 8Mbps
-        # Both use maxperf-enable=1 for optimal dual-encoder performance
+        # This eliminates the decode/re-encode step for faster WebRTC connection
         pipeline_str = (
             "nvarguscamerasrc sensor-id=0 ! "
             "video/x-raw(memory:NVMM), width=1920, height=1080, framerate=30/1, format=NV12 ! "
             "nvvidconv flip-method=2 ! "
             "video/x-raw(memory:NVMM), format=NV12 ! "
             "tee name=t "
-            # WebRTC Branch (Always active) - Hardware H.264 encoded
+            # WebRTC Branch (Always active) - Raw frames output
             "t. ! queue max-size-buffers=1 leaky=downstream ! "
             "nvvidconv ! "
-            "video/x-raw(memory:NVMM), width=960, height=540, format=NV12 ! "
-            "nvv4l2h264enc name=webrtc_enc maxperf-enable=1 bitrate=3000000 iframeinterval=30 insert-sps-pps=true insert-vui=true !"
-            "video/x-h264, stream-format=byte-stream ! "
-            "h264parse ! "
+            "video/x-raw, width=960, height=540, format=I420 ! "
             "appsink name=appsink emit-signals=true max-buffers=1 drop=true"
         )
         
@@ -147,35 +144,31 @@ class JetsonCameraManager:
             print(f"GLib loop error: {e}")
 
     def _on_new_sample(self, sink):
-        """Callback for appsink to retrieve H.264 encoded packets for WebRTC"""
+        """Callback for appsink to retrieve raw YUV420 frames for WebRTC"""
         sample = sink.emit("pull-sample")
         if sample:
             buf = sample.get_buffer()
-            # Map the buffer to read H.264 data
             result, map_info = buf.map(Gst.MapFlags.READ)
             if result:
                 try:
-                    # Copy H.264 packet data
-                    # H.264 packets are much smaller than raw frames (~10-50 KB vs 778 KB)
+                    # Copy raw frame data (I420 format: Y plane + U plane + V plane)
                     data = bytes(map_info.data)
-
-                    # Get PTS (presentation timestamp) from buffer
                     pts = buf.pts if buf.pts != Gst.CLOCK_TIME_NONE else 0
 
-                    # Store both data and timestamp
-                    packet_info = {
+                    frame_info = {
                         'data': data,
                         'pts': pts,
-                        'size': len(data)
+                        'width': 960,
+                        'height': 540
                     }
 
-                    # Put in queue, replace old packet if full (leaky)
+                    # Put in queue, replace old frame if full (leaky)
                     if self.frame_queue.full():
                         try:
                             self.frame_queue.get_nowait()
                         except queue.Empty:
                             pass
-                    self.frame_queue.put_nowait(packet_info)
+                    self.frame_queue.put_nowait(frame_info)
                 finally:
                     buf.unmap(map_info)
         return Gst.FlowReturn.OK
@@ -191,7 +184,7 @@ class JetsonCameraManager:
             self.close()
 
     def get_frame(self):
-        """Get the latest H.264 packet data"""
+        """Get the latest raw YUV420 frame data"""
         try:
             return self.frame_queue.get_nowait()
         except queue.Empty:
@@ -311,51 +304,30 @@ camera_manager = JetsonCameraManager()
 
 class JetsonStreamTrack(VideoStreamTrack):
     """
-    WebRTC Video Track that sources H.264 encoded packets from the JetsonCameraManager.
-    This now streams pre-encoded H.264 data, significantly reducing CPU usage.
+    WebRTC Video Track that sources raw YUV420 frames from the JetsonCameraManager.
+    Frames are passed directly to aiortc for encoding (single encode step).
     """
     def __init__(self):
         super().__init__()
         self.width = 960
         self.height = 540
-        self.codec = None
-        self._start = None
-        self.last_frame = None
 
     async def recv(self):
         """
-        Receive and decode H.264 packets, returning decoded frames to aiortc.
-        aiortc will re-encode using the negotiated codec (typically VP8/VP9/H.264).
-
-        Note: We could pass H.264 packets directly if we implement proper RTP packetization,
-        but for simplicity we decode here and let aiortc handle re-encoding.
-        Future optimization: Implement H264 RTP payloader to pass packets directly.
+        Receive raw YUV420 frames and pass to aiortc for encoding.
         """
         pts, time_base = await self.next_timestamp()
 
-        # Initialize codec on first call
-        if self.codec is None:
-            self.codec = av.CodecContext.create("h264", "r")
-            # Don't set width/height - let decoder figure it out from stream
-            # Enable error concealment
-            self.codec.options = {'flags': 'low_delay'}
-            self.codec.open()
-
-        # Get H.264 packet from camera manager
-        packet_info = None
+        # Get raw frame from camera manager
+        frame_info = None
         for _ in range(10):
-            packet_info = camera_manager.get_frame()
-            if packet_info:
+            frame_info = camera_manager.get_frame()
+            if frame_info:
                 break
             await asyncio.sleep(0.01)
 
-        if packet_info is None:
-            # Return last good frame or black frame if no data
-            if self.last_frame:
-                self.last_frame.pts = pts
-                self.last_frame.time_base = time_base
-                return self.last_frame
-
+        if frame_info is None:
+            # Return black frame if no data
             frame = av.VideoFrame(width=self.width, height=self.height, format="yuv420p")
             for plane in frame.planes:
                 plane.update(bytes(plane.buffer_size))
@@ -363,63 +335,37 @@ class JetsonStreamTrack(VideoStreamTrack):
             frame.time_base = time_base
             return frame
 
-        # Decode H.264 packet
         try:
-            h264_data = packet_info['data']
-            packet = av.Packet(h264_data)
-            packet.pts = packet_info['pts']
-            packet.dts = packet_info['pts']
+            # Convert raw I420 data to av.VideoFrame
+            # I420 format: Y plane (width*height), U plane (width*height/4), V plane (width*height/4)
+            data = frame_info['data']
+            width = frame_info['width']
+            height = frame_info['height']
 
-            frames = self.codec.decode(packet)
+            # Calculate plane sizes
+            y_size = width * height
+            uv_size = (width // 2) * (height // 2)
 
-            if frames:
-                # Use the first decoded frame
-                decoded_frame = frames[0]
-                decoded_frame.pts = pts
-                decoded_frame.time_base = time_base
-                self.last_frame = decoded_frame  # Cache for next time
-                return decoded_frame
-            else:
-                # No frame decoded yet (might need more data or be waiting for keyframe)
-                # Return last good frame or black frame
-                if self.last_frame:
-                    self.last_frame.pts = pts
-                    self.last_frame.time_base = time_base
-                    return self.last_frame
+            # Create VideoFrame from raw bytes
+            frame = av.VideoFrame(width=width, height=height, format='yuv420p')
 
-                frame = av.VideoFrame(width=self.width, height=self.height, format="yuv420p")
-                for plane in frame.planes:
-                    plane.update(bytes(plane.buffer_size))
-                frame.pts = pts
-                frame.time_base = time_base
-                return frame
+            # Copy data to frame planes
+            y_end = y_size
+            u_end = y_end + uv_size
+            v_end = u_end + uv_size
 
-        except av.InvalidDataError as e:
-            # Invalid H.264 data - likely waiting for keyframe (SPS/PPS)
-            # Silently return last good frame or black frame
-            if self.last_frame:
-                self.last_frame.pts = pts
-                self.last_frame.time_base = time_base
-                return self.last_frame
+            frame.planes[0].update(data[:y_end])
+            frame.planes[1].update(data[y_end:u_end])
+            frame.planes[2].update(data[u_end:v_end])
 
-            frame = av.VideoFrame(width=self.width, height=self.height, format="yuv420p")
-            for plane in frame.planes:
-                plane.update(bytes(plane.buffer_size))
             frame.pts = pts
             frame.time_base = time_base
             return frame
+
         except Exception as e:
-            # Other errors - log once and return black frame
-            if not hasattr(self, '_error_logged'):
-                print(f"Error decoding H.264 packet: {e}")
-                self._error_logged = True
-
-            if self.last_frame:
-                self.last_frame.pts = pts
-                self.last_frame.time_base = time_base
-                return self.last_frame
-
-            frame = av.VideoFrame(width=self.width, height=self.height, format="yuv420p")
+            print(f"Error processing raw frame: {e}")
+            # Return black frame on error
+            frame = av.VideoFrame(width=self.width, height=self.height, format='yuv420p')
             for plane in frame.planes:
                 plane.update(bytes(plane.buffer_size))
             frame.pts = pts

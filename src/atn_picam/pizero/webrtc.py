@@ -114,27 +114,67 @@ class CameraManager:
 
     def _init_camera(self):
         print("Initializing Camera Manager...")
+        
+        # Check if any cameras are available
+        try:
+            cameras = Picamera2.global_camera_info()
+            if not cameras:
+                print("ERROR: No cameras detected!")
+                print("Troubleshooting steps:")
+                print("  1. Check camera cable connection")
+                print("  2. Ensure camera is enabled: sudo raspi-config -> Interface Options -> Camera")
+                print("  3. Run: libcamera-hello --list-cameras")
+                print("  4. Check dmesg for camera errors: dmesg | grep -i camera")
+                return
+            
+            print(f"Found {len(cameras)} camera(s):")
+            for i, cam in enumerate(cameras):
+                print(f"  [{i}] {cam.get('Model', 'Unknown')} - {cam.get('Id', 'No ID')}")
+        except Exception as e:
+            print(f"ERROR: Failed to query cameras: {e}")
+            return
+        
         self.picam2 = Picamera2()
 
+        # Auto-detect camera model and get sensor dimensions
+        camera_props = self.picam2.camera_properties
+        model = camera_props.get('Model', 'unknown')
+        
+        # Define sensor configurations for supported cameras
+        if 'imx708' in model.lower():
+            # Camera Module 3 (IMX708): 12MP sensor
+            sensor_width, sensor_height = 4608, 2592
+            raw_width, raw_height = 2304, 1296  # 2×2 binned mode for 30fps
+            camera_name = "Camera Module 3 (IMX708)"
+        elif 'imx219' in model.lower():
+            # IMX219-200: 8MP sensor
+            sensor_width, sensor_height = 3280, 2464
+            raw_width, raw_height = 1640, 1232  # 2×2 binned mode for 30fps
+            camera_name = "IMX219-200"
+        else:
+            # Default fallback (assume IMX219 dimensions)
+            print(f"Warning: Unknown camera model '{model}', using IMX219 defaults")
+            sensor_width, sensor_height = 3280, 2464
+            raw_width, raw_height = 1640, 1232
+            camera_name = f"Unknown ({model})"
+        
+        print(f"Detected camera: {camera_name}")
+        print(f"  Sensor size: {sensor_width}×{sensor_height}")
+        print(f"  Raw config: {raw_width}×{raw_height}")
+
         # Configure dual streams
-        # Camera Module 3 (IMX708) sensor modes:
-        # - 4608×2592 @ 14 fps (max resolution, too slow)
-        # - 2304×1296 @ 56 fps (2×2 binned, full FOV, supports 30fps)
-        # - 1536×864 @ 120 fps (cropped FOV)
-        # IMPORTANT: Use 2304×1296 for full FOV at 30fps
         config = self.picam2.create_video_configuration(
             main={"size": (1920, 1080), "format": "YUV420"},  # High quality for recording
             lores={"size": (960, 540), "format": "YUV420"},   # Low res for WebRTC (qHD)
-            raw={"size": (2304, 1296)},  # 2×2 binned mode, full FOV @ 56fps
-            sensor={"output_size": (2304, 1296), "bit_depth": 10}  # Prevent sensor cropping
+            raw={"size": (raw_width, raw_height)},  # 2×2 binned mode for 30fps
+            sensor={"output_size": (raw_width, raw_height), "bit_depth": 10}  # Prevent sensor cropping
         )
         self.picam2.configure(config)
 
         # Set ScalerCrop to use FULL sensor area (prevents zoom/crop)
-        # IMX708 full active area is 4608x2592
         self.picam2.set_controls({
             "FrameRate": 30.0,
-            "ScalerCrop": (0, 0, 4608, 2592)  # Full sensor area
+            "ScalerCrop": (0, 0, sensor_width, sensor_height)  # Full sensor area
         })
 
         self.picam2.start()
@@ -143,7 +183,7 @@ class CameraManager:
         # Warmup and re-apply ScalerCrop to ensure it takes effect
         time.sleep(0.1)
         self.picam2.set_controls({
-            "ScalerCrop": (0, 0, 4608, 2592)  # Full sensor area - no cropping
+            "ScalerCrop": (0, 0, sensor_width, sensor_height)  # Full sensor area - no cropping
         })
         time.sleep(0.9)
         print("Camera Manager ready.")
@@ -186,6 +226,7 @@ class CameraManager:
                 '-framerate', '30',
                 '-i', '-',       # Read from stdin
                 '-fflags', '+genpts',  # Generate presentation timestamps
+                '-use_wallclock_as_timestamps', '1',  # Use system time for timestamps
                 '-c:v', 'copy',  # Copy video stream (no re-encoding)
                 '-f', 'mp4',
                 '-movflags', '+faststart',  # Optimize for web playback

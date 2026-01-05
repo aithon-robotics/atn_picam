@@ -60,6 +60,15 @@ The package installs several command-line tools for easy access.
     *   Access at `http://<pi-ip>:8080`
     *   Records to `~/recordings/`
 
+*   **Remote Start from Steam Deck (or any device):**
+    ```bash
+    ssh atnp1 "/home/atn/aithon_code/atn_picam/venv/bin/python3 -m atn_picam.pizero.webrtc"
+    ```
+    *   Starts WebRTC streaming remotely via SSH
+    *   Replace `atnp1` with your Pi's hostname or IP
+    *   Use Ctrl+C to stop
+    *   On Steamdeck, the joystick bash script starts the cameras automatically.
+
 ### 🟢 NVIDIA Jetson
 
 *   **Stream + Record (MJPEG):**
@@ -151,10 +160,42 @@ To make the camera start automatically on boot, use the provided scripts.
 
 ## 🛠 Troubleshooting
 
+### Camera Setup
+
+*   **Camera not detected on Raspberry Pi?**
+    1.  Check cable connection (blue side faces USB ports)
+    2.  Enable camera: `sudo raspi-config` → Interface Options → Camera
+    3.  Verify detection: `vcgencmd get_camera` (should show `detected=1`)
+    4.  Check logs: `dmesg | grep -iE "camera|imx219|imx708"`
+
+*   **Manual camera overlay configuration:**
+    
+    For IMX219 or IMX708 cameras that don't auto-detect, add to `/boot/firmware/config.txt`:
+    ```bash
+    # For Camera Module 3 (IMX708)
+    dtoverlay=imx708
+    
+    # For IMX219-200
+    dtoverlay=imx219
+    ```
+    Then reboot: `sudo reboot`
+    
+    **Important:** Only use ONE overlay at a time. Having both enabled simultaneously causes conflicts and prevents camera detection.
+    
+    **To swap cameras:**
+    1. Power off the Pi
+    2. Edit `/boot/firmware/config.txt` and change the `dtoverlay` line
+    3. Swap the physical camera
+    4. Power on and reboot
+    
+    The code automatically detects which camera is connected and configures the correct sensor dimensions (IMX708: 4608×2592, IMX219: 3280×2464).
+
+### General Issues
+
 *   **Service fails to start?**
     Check logs: `sudo journalctl -u <service_name> -n 50`
 *   **Camera not found?**
-    *   Pi: Run `libcamera-hello --list-cameras`
+    *   Pi: Run `libcamera-hello --list-cameras` or `vcgencmd get_camera`
     *   Jetson: Run `v4l2-ctl --list-devices` or check `nvargus-daemon` status
 *   **Permission denied?**
     Ensure the user `atn` (or your configured user) has access to video devices (`sudo usermod -aG video atn`)
