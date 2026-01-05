@@ -24,7 +24,6 @@ import time
 import uuid
 import psutil
 import threading
-import queue
 from datetime import datetime
 
 import gi
@@ -71,11 +70,12 @@ class JetsonCameraManager:
         self.recording_bin = None
         self.recording_active = False
         self.current_recording_file = None
-        self.frame_queue = queue.Queue(maxsize=1)
+        self.latest_frame = None  # Shared frame for all viewers
+        self.frame_lock = threading.Lock()  # Protect frame access
         self.loop = None
         self.thread = None
         self.running = False
-        
+
         self._init_pipeline()
 
     def _init_pipeline(self):
@@ -162,13 +162,9 @@ class JetsonCameraManager:
                         'height': 540
                     }
 
-                    # Put in queue, replace old frame if full (leaky)
-                    if self.frame_queue.full():
-                        try:
-                            self.frame_queue.get_nowait()
-                        except queue.Empty:
-                            pass
-                    self.frame_queue.put_nowait(frame_info)
+                    # Store frame with thread safety - all viewers can read this
+                    with self.frame_lock:
+                        self.latest_frame = frame_info
                 finally:
                     buf.unmap(map_info)
         return Gst.FlowReturn.OK
@@ -184,11 +180,9 @@ class JetsonCameraManager:
             self.close()
 
     def get_frame(self):
-        """Get the latest raw YUV420 frame data"""
-        try:
-            return self.frame_queue.get_nowait()
-        except queue.Empty:
-            return None
+        """Get the latest raw YUV420 frame data (thread-safe, non-blocking)"""
+        with self.frame_lock:
+            return self.latest_frame
 
     def start_recording(self):
         if self.recording_active:
