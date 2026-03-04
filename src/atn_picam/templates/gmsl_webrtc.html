@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ATN — GMSL2 4-Camera WebRTC</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                         Helvetica, Arial, sans-serif;
+            background: #0d1117;
+            color: #e6edf3;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* ── Header ─────────────────────────────────────────────────────── */
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 20px;
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        header h1 { font-size: 18px; font-weight: 600; color: #c9d1d9; }
+        header h1 span { color: #58a6ff; }
+
+        .header-status {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            font-size: 13px;
+        }
+        .conn-indicator {
+            width: 10px; height: 10px;
+            border-radius: 50%;
+            background: #30363d;
+            transition: background 0.3s;
+        }
+        .conn-indicator.connecting { background: #f0c040; animation: pulse 1s infinite; }
+        .conn-indicator.connected  { background: #3fb950; }
+        .conn-indicator.failed     { background: #f85149; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50%       { opacity: 0.3; }
+        }
+
+        /* ── Controls bar ────────────────────────────────────────────────── */
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 20px;
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+            flex-wrap: wrap;
+        }
+        button {
+            padding: 6px 16px;
+            font-size: 13px;
+            font-weight: 600;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            color: #fff;
+            transition: opacity 0.2s;
+        }
+        button:disabled { opacity: 0.4; cursor: not-allowed; }
+        .btn-connect    { background: #238636; }
+        .btn-connect:hover:not(:disabled) { background: #2ea043; }
+        .btn-disconnect { background: #6e7681; }
+        .btn-disconnect:hover:not(:disabled) { background: #8b949e; }
+
+        #status-text {
+            font-size: 13px;
+            color: #8b949e;
+        }
+        #net-stats {
+            font-size: 12px;
+            color: #8b949e;
+            font-family: "SF Mono", "Fira Code", monospace;
+            margin-left: auto;
+        }
+
+        /* ── Camera grid ─────────────────────────────────────────────────── */
+        main {
+            flex: 1;
+            padding: 16px;
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            grid-template-rows: repeat(2, 1fr);
+            gap: 10px;
+        }
+
+        @media (max-width: 640px) {
+            main {
+                grid-template-columns: 1fr;
+                grid-template-rows: auto;
+            }
+        }
+
+        .cam-cell {
+            position: relative;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .cam-cell video {
+            width: 100%;
+            aspect-ratio: 16 / 9;
+            background: #000;
+            object-fit: contain;
+        }
+
+        .cam-footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 4px 10px;
+            font-size: 11px;
+            color: #8b949e;
+            background: #0d1117;
+            border-top: 1px solid #21262d;
+        }
+        .cam-label { font-weight: 600; color: #c9d1d9; }
+        .cam-stats { font-family: "SF Mono", "Fira Code", monospace; }
+
+        .cam-overlay {
+            position: absolute;
+            top: 8px; left: 8px;
+            background: rgba(0,0,0,0.6);
+            border-radius: 4px;
+            padding: 2px 7px;
+            font-size: 11px;
+            font-weight: 600;
+            color: #fff;
+            pointer-events: none;
+        }
+        .cam-overlay.active { background: rgba(35, 134, 54, 0.8); }
+        .cam-overlay.waiting { background: rgba(110, 118, 129, 0.8); }
+
+        /* ── Footer ──────────────────────────────────────────────────────── */
+        footer {
+            padding: 8px 20px;
+            background: #161b22;
+            border-top: 1px solid #30363d;
+            font-size: 11px;
+            color: #6e7681;
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>ATN <span>GMSL2</span> 4-Camera WebRTC</h1>
+    <div class="header-status">
+        <div class="conn-indicator" id="connDot"></div>
+        <span id="connLabel">Disconnected</span>
+    </div>
+</header>
+
+<div class="controls">
+    <button class="btn-connect"    id="btnConnect"    onclick="connect()">Connect</button>
+    <button class="btn-disconnect" id="btnDisconnect" onclick="disconnect()" disabled>Disconnect</button>
+    <span id="status-text">Click Connect to start streaming</span>
+    <span id="net-stats"></span>
+</div>
+
+<main id="cameraGrid">
+    <!-- Cells are generated by JS based on how many tracks arrive -->
+    <div class="cam-cell" id="cell-0">
+        <video id="video-0" autoplay playsinline muted></video>
+        <div class="cam-overlay waiting" id="overlay-0">CAM 0</div>
+        <div class="cam-footer">
+            <span class="cam-label">Camera 0 — /dev/video0</span>
+            <span class="cam-stats" id="stats-0">—</span>
+        </div>
+    </div>
+    <div class="cam-cell" id="cell-1">
+        <video id="video-1" autoplay playsinline muted></video>
+        <div class="cam-overlay waiting" id="overlay-1">CAM 1</div>
+        <div class="cam-footer">
+            <span class="cam-label">Camera 1 — /dev/video1</span>
+            <span class="cam-stats" id="stats-1">—</span>
+        </div>
+    </div>
+    <div class="cam-cell" id="cell-2">
+        <video id="video-2" autoplay playsinline muted></video>
+        <div class="cam-overlay waiting" id="overlay-2">CAM 2</div>
+        <div class="cam-footer">
+            <span class="cam-label">Camera 2 — /dev/video2</span>
+            <span class="cam-stats" id="stats-2">—</span>
+        </div>
+    </div>
+    <div class="cam-cell" id="cell-3">
+        <video id="video-3" autoplay playsinline muted></video>
+        <div class="cam-overlay waiting" id="overlay-3">CAM 3</div>
+        <div class="cam-footer">
+            <span class="cam-label">Camera 3 — /dev/video3</span>
+            <span class="cam-stats" id="stats-3">—</span>
+        </div>
+    </div>
+</main>
+
+<footer>
+    <span id="storage-info">Storage: —</span>
+    <span id="server-info">Encoder: nvv4l2h264enc · Transport: WebRTC/H.264 bundle</span>
+</footer>
+
+<script>
+"use strict";
+
+const NUM_CAMERAS = 4;
+let pc = null;
+let statsIntervalId = null;
+let trackIndex = 0;  // assigned as ontrack fires (one per camera)
+
+// ── UI helpers ─────────────────────────────────────────────────────────────
+
+function setStatus(msg) {
+    document.getElementById("status-text").textContent = msg;
+}
+
+function setConnUI(state) {
+    const dot   = document.getElementById("connDot");
+    const label = document.getElementById("connLabel");
+    dot.className = "conn-indicator " + state;
+    const labels = { connecting: "Connecting…", connected: "Connected", failed: "Failed", "": "Disconnected" };
+    label.textContent = labels[state] || "Disconnected";
+}
+
+function setCamOverlay(idx, state) {
+    const ov = document.getElementById("overlay-" + idx);
+    if (!ov) return;
+    ov.className = "cam-overlay " + state;
+    ov.textContent = "CAM " + idx + (state === "active" ? " ●" : "");
+}
+
+// ── WebRTC ─────────────────────────────────────────────────────────────────
+
+async function connect() {
+    document.getElementById("btnConnect").disabled = true;
+    document.getElementById("btnDisconnect").disabled = false;
+    trackIndex = 0;
+    setConnUI("connecting");
+    setStatus("Creating peer connection…");
+
+    // Direct Ethernet link: no STUN/TURN needed for host candidates.
+    // Include Google STUN as fallback in case routing is unusual.
+    pc = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+        bundlePolicy: "max-bundle",
+    });
+
+    pc.oniceconnectionstatechange = () => {
+        const s = pc.iceConnectionState;
+        setStatus("ICE: " + s);
+        if (s === "connected" || s === "completed") {
+            setConnUI("connected");
+            setStatus("Streaming — " + NUM_CAMERAS + " cameras");
+            startStats();
+        } else if (s === "failed" || s === "closed") {
+            setConnUI("failed");
+            setStatus("ICE " + s + " — click Connect to retry");
+            document.getElementById("btnConnect").disabled = false;
+            document.getElementById("btnDisconnect").disabled = true;
+        }
+    };
+
+    // Each ontrack fires once per camera video track
+    pc.ontrack = (evt) => {
+        const idx = trackIndex++;
+        const video = document.getElementById("video-" + idx);
+        if (!video) { console.warn("No video element for track", idx); return; }
+        video.srcObject = evt.streams[0] || new MediaStream([evt.track]);
+        setCamOverlay(idx, "active");
+        console.log("Track", idx, "attached", evt.track.id);
+    };
+
+    // Add N recvonly video transceivers — one per camera.
+    // The Jetson server will match each to a camera pipeline.
+    for (let i = 0; i < NUM_CAMERAS; i++) {
+        pc.addTransceiver("video", { direction: "recvonly" });
+    }
+
+    setStatus("Creating SDP offer…");
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    // Wait for ICE gathering to complete so all host candidates are in the SDP.
+    // On a direct Ethernet link this typically takes < 200 ms.
+    await waitForICEGathering(pc);
+
+    setStatus("Sending offer to Jetson…");
+    let answer;
+    try {
+        const resp = await fetch("/offer", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                sdp: pc.localDescription.sdp,
+                type: pc.localDescription.type,
+            }),
+        });
+        if (!resp.ok) {
+            throw new Error("Server returned " + resp.status + ": " + await resp.text());
+        }
+        answer = await resp.json();
+    } catch (err) {
+        setStatus("Error: " + err.message);
+        setConnUI("failed");
+        disconnect();
+        return;
+    }
+
+    setStatus("Setting remote description…");
+    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+}
+
+function disconnect() {
+    stopStats();
+    if (pc) { pc.close(); pc = null; }
+    for (let i = 0; i < NUM_CAMERAS; i++) {
+        const v = document.getElementById("video-" + i);
+        if (v) v.srcObject = null;
+        setCamOverlay(i, "waiting");
+        document.getElementById("stats-" + i).textContent = "—";
+    }
+    document.getElementById("btnConnect").disabled = false;
+    document.getElementById("btnDisconnect").disabled = true;
+    document.getElementById("net-stats").textContent = "";
+    setConnUI("");
+    setStatus("Disconnected");
+}
+
+// ── ICE gathering helper ────────────────────────────────────────────────────
+
+function waitForICEGathering(peerConn) {
+    if (peerConn.iceGatheringState === "complete") return Promise.resolve();
+    return new Promise((resolve) => {
+        const check = () => {
+            if (peerConn.iceGatheringState === "complete") {
+                peerConn.removeEventListener("icegatheringstatechange", check);
+                resolve();
+            }
+        };
+        peerConn.addEventListener("icegatheringstatechange", check);
+        // Fallback: resolve after 2 s even if not complete (host candidates only)
+        setTimeout(resolve, 2000);
+    });
+}
+
+// ── Per-stream stats ────────────────────────────────────────────────────────
+
+function startStats() {
+    stopStats();
+    statsIntervalId = setInterval(updateStats, 1500);
+}
+
+function stopStats() {
+    if (statsIntervalId) { clearInterval(statsIntervalId); statsIntervalId = null; }
+}
+
+async function updateStats() {
+    if (!pc) return;
+
+    let totalBitsPerSec = 0;
+    const stats = await pc.getStats();
+    const trackStats = {};   // mid → {width, height, fps, bps}
+
+    // Build a map: ssrc → mid
+    const ssrcMid = {};
+    stats.forEach(r => {
+        if (r.type === "transport") return;
+    });
+
+    stats.forEach(r => {
+        if (r.type === "inbound-rtp" && r.kind === "video") {
+            const mid = r.mid ?? r.trackIdentifier ?? "";
+            if (!trackStats[mid]) trackStats[mid] = {};
+            trackStats[mid].width  = r.frameWidth  || 0;
+            trackStats[mid].height = r.frameHeight || 0;
+            trackStats[mid].fps    = Math.round(r.framesPerSecond || 0);
+            // Bitrate requires previous sample; use bytesReceived delta
+            trackStats[mid].bytes  = r.bytesReceived || 0;
+            totalBitsPerSec += (r.bytesReceived || 0);
+        }
+    });
+
+    // Show per-camera stats in order of mid (which correlates with cam index)
+    const mids = Object.keys(trackStats).sort();
+    mids.forEach((mid, idx) => {
+        const s = trackStats[mid];
+        const el = document.getElementById("stats-" + idx);
+        if (el && s.width) {
+            el.textContent = `${s.width}×${s.height} @ ${s.fps}fps`;
+        }
+    });
+}
+
+// ── Storage & server info ───────────────────────────────────────────────────
+
+async function updateStorageInfo() {
+    try {
+        const r = await fetch("/storage_info");
+        const d = await r.json();
+        if (d.success) {
+            document.getElementById("storage-info").textContent =
+                `Storage: ${d.free_gb} GB free / ${d.total_gb} GB total`;
+        }
+    } catch (_) {}
+}
+
+async function updateServerInfo() {
+    try {
+        const r = await fetch("/status");
+        const d = await r.json();
+        document.getElementById("server-info").textContent =
+            `Encoder: nvv4l2h264enc · ${d.stream_resolution} · ` +
+            `${d.stream_bitrate_mbps} Mbps/cam · ${d.num_cameras} cameras`;
+    } catch (_) {}
+}
+
+// ── Init ────────────────────────────────────────────────────────────────────
+
+updateStorageInfo();
+updateServerInfo();
+setInterval(updateStorageInfo, 15_000);
+</script>
+</body>
+</html>
