@@ -36,6 +36,19 @@ from aiortc.mediastreams import MediaStreamTrack
 import av
 from atn_picam.core.storage import check_and_cleanup_storage
 
+# Standard 16:9 resolutions (width, height) to pick from for the WebRTC stream
+RES_240P = (426, 240)
+RES_360P = (640, 360)
+RES_480P = (854, 480)
+RES_QHD_540P = (960, 540)
+RES_720P = (1280, 720)
+RES_1080P = (1920, 1080)
+
+# Raw YUV420 frames sent over WebRTC - lower resolution reduces encode/network load
+WEBRTC_RESOLUTION = RES_360P
+# Source capture / on-disk recording resolution (H.264, separate tee branch)
+RECORDING_RESOLUTION = RES_1080P
+
 # Initialize GStreamer
 Gst.init(None)
 
@@ -82,19 +95,19 @@ class JetsonCameraManager:
         print("Initializing Jetson Camera Pipeline with Raw Frame Output...")
 
         # Main pipeline: Source -> Tee -> WebRTC Branch (Raw frames)
-        # WebRTC branch now outputs RAW YUV420 frames at 960x540 (no H.264 encoding)
-        # Recording branch (dynamically added) uses H.264 at 1920x1080 @ 8Mbps
+        # WebRTC branch outputs RAW YUV420 frames at WEBRTC_RESOLUTION (no H.264 encoding)
+        # Recording branch (dynamically added) uses H.264 at RECORDING_RESOLUTION @ 8Mbps
         # This eliminates the decode/re-encode step for faster WebRTC connection
         pipeline_str = (
             "nvarguscamerasrc sensor-id=0 ! "
-            "video/x-raw(memory:NVMM), width=1920, height=1080, framerate=30/1, format=NV12 ! "
+            f"video/x-raw(memory:NVMM), width={RECORDING_RESOLUTION[0]}, height={RECORDING_RESOLUTION[1]}, framerate=30/1, format=NV12 ! "
             "nvvidconv flip-method=2 ! "
             "video/x-raw(memory:NVMM), format=NV12 ! "
             "tee name=t "
             # WebRTC Branch (Always active) - Raw frames output
             "t. ! queue max-size-buffers=1 leaky=downstream ! "
             "nvvidconv ! "
-            "video/x-raw, width=960, height=540, format=I420 ! "
+            f"video/x-raw, width={WEBRTC_RESOLUTION[0]}, height={WEBRTC_RESOLUTION[1]}, format=I420 ! "
             "appsink name=appsink emit-signals=true max-buffers=1 drop=true"
         )
         
@@ -158,8 +171,8 @@ class JetsonCameraManager:
                     frame_info = {
                         'data': data,
                         'pts': pts,
-                        'width': 960,
-                        'height': 540
+                        'width': WEBRTC_RESOLUTION[0],
+                        'height': WEBRTC_RESOLUTION[1]
                     }
 
                     # Store frame with thread safety - all viewers can read this
@@ -303,8 +316,8 @@ class JetsonStreamTrack(VideoStreamTrack):
     """
     def __init__(self):
         super().__init__()
-        self.width = 960
-        self.height = 540
+        self.width = WEBRTC_RESOLUTION[0]
+        self.height = WEBRTC_RESOLUTION[1]
 
     async def recv(self):
         """
