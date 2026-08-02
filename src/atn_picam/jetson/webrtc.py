@@ -36,10 +36,16 @@ from aiortc.mediastreams import MediaStreamTrack
 import av
 from atn_picam.core.storage import check_and_cleanup_storage
 
-# Standard 16:9 resolutions (width, height) to pick from for the WebRTC stream
-RES_240P = (426, 240)
+# Standard 16:9 resolutions (width, height) to pick from for the WebRTC stream.
+# Widths must stay multiples of 32: the raw-frame copy in JetsonStreamTrack.recv()
+# slices the buffer using plain width*height math, and a non-aligned width causes
+# pyav's plane buffer_size to be padded to a wider stride than we slice for, which
+# fails every frame and silently falls back to an all-zero (green, not black) frame.
+# The traditional 426x240 / 854x480 pixel counts are NOT multiples of 32 - use the
+# widths below instead, which keep the same ~16:9 aspect ratio.
+RES_240P = (416, 240)
 RES_360P = (640, 360)
-RES_480P = (854, 480)
+RES_480P = (832, 480)
 RES_QHD_540P = (960, 540)
 RES_720P = (1280, 720)
 RES_1080P = (1920, 1080)
