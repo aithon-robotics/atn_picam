@@ -51,7 +51,7 @@ RES_720P = (1280, 720)
 RES_1080P = (1920, 1080)
 
 # Raw YUV420 frames sent over WebRTC - lower resolution reduces encode/network load
-WEBRTC_RESOLUTION = RES_360P
+WEBRTC_RESOLUTION = RES_QHD_540P
 # Source capture / on-disk recording resolution (H.264, separate tee branch)
 RECORDING_RESOLUTION = RES_1080P
 
