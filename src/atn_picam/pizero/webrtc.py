@@ -441,9 +441,9 @@ async def storage_info(request):
         os.makedirs(recordings_dir, exist_ok=True)
         
         stat = os.statvfs(recordings_dir)
-        free_space_gb = (stat.f_bavail * stat.f_frsize) / (1024 * 1024 * 1024)
-        total_space_gb = (stat.f_blocks * stat.f_frsize) / (1024 * 1024 * 1024)
-        
+        free_space_gb = (stat.f_bavail * stat.f_frsize) / 1e9  # decimal GB, matches rosbag_record_node
+        total_space_gb = (stat.f_blocks * stat.f_frsize) / 1e9
+
         return web.json_response({
             "success": True,
             "free_gb": round(free_space_gb, 2),
