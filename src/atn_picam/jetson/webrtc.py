@@ -54,6 +54,12 @@ RES_1080P = (1920, 1080)
 WEBRTC_RESOLUTION = RES_QHD_540P
 # Source capture / on-disk recording resolution (H.264, separate tee branch)
 RECORDING_RESOLUTION = RES_1080P
+# Fragmented MP4: max video lost if the recorder dies without a clean stop
+RECORDING_FRAGMENT_MS = 1000
+# Stop: wait this long for the tee pad to block before sending EOS directly
+RECORDING_BLOCK_TIMEOUT_S = 2
+# Stop: wait this long for EOS to reach the filesink before tearing down
+RECORDING_FINALIZE_TIMEOUT_S = 10
 
 # Initialize GStreamer
 Gst.init(None)
@@ -89,6 +95,8 @@ class JetsonCameraManager:
         self.recording_bin = None
         self.recording_active = False
         self.current_recording_file = None
+        self.recording_finalized = None  # set when EOS reaches the filesink
+        self.recording_stopped = None    # set when the recording bin is removed
         self.latest_frame = None  # Shared frame for all viewers
         self.frame_lock = threading.Lock()  # Protect frame access
         self.loop = None
@@ -221,13 +229,39 @@ class JetsonCameraManager:
             # queue -> nvv4l2h264enc -> h264parse -> qtmux -> filesink
             # Using maxperf-enable=1 for optimal dual-encoder performance
             # Recording at full resolution (1920x1080) with higher bitrate (8 Mbps)
+            #
+            # qtmux writes a fragmented MP4 (one fragment per second) and, on a
+            # clean EOS, finalises it into a regular MP4. A plain MP4 only gets
+            # its index (moov) on a clean EOS, so a power cut or killed service
+            # left the whole file unplayable. Fragmented, at most the last ~1 s
+            # is lost.
+            # first-moov-then-finalise (not the default dash-or-mss mode): with
+            # GStreamer 1.20 the default mode writes one trun per sample, which
+            # ffmpeg (and everything built on it) mis-reads as garbage frames.
             bin_str = (
                 f"queue name=rec_queue max-size-buffers=2 leaky=downstream ! "
                 f"nvv4l2h264enc name=recording_enc maxperf-enable=1 bitrate=8000000 iframeinterval=30 insert-sps-pps=true insert-vui=true ! "
-                f"h264parse ! qtmux ! filesink location={filename} name=rec_sink"
+                f"h264parse ! "
+                f"qtmux fragment-duration={RECORDING_FRAGMENT_MS} fragment-mode=first-moov-then-finalise ! "
+                f"filesink location={filename} name=rec_sink"
             )
-            
+
             self.recording_bin = Gst.parse_bin_from_description(bin_str, True)
+
+            # Signal when EOS reaches the filesink: qtmux has then written
+            # everything, so the bin can be torn down without losing data.
+            self.recording_finalized = threading.Event()
+            finalized = self.recording_finalized
+
+            def on_sink_event(pad, info):
+                if info.get_event().type == Gst.EventType.EOS:
+                    finalized.set()
+                return Gst.PadProbeReturn.OK
+
+            rec_sink = self.recording_bin.get_by_name("rec_sink")
+            rec_sink.get_static_pad("sink").add_probe(
+                Gst.PadProbeType.EVENT_DOWNSTREAM, on_sink_event)
+
             self.pipeline.add(self.recording_bin)
             self.recording_bin.sync_state_with_parent()
             
@@ -258,45 +292,70 @@ class JetsonCameraManager:
         filename = self.current_recording_file
         print(f"Stopping recording: {filename}")
         
+        if self.recording_stopped is not None and not self.recording_stopped.is_set():
+            return {"success": True, "file": filename, "message": "Already stopping"}
+
         # To stop cleanly:
         # 1. Block the tee src pad
-        # 2. Send EOS to the recording bin
-        # 3. Unlink and remove bin
-        
-        def pad_probe_cb(pad, info, user_data):
-            # Remove the probe
-            pad.remove_probe(info.id)
-            
-            # Unlink
-            sink_pad = self.recording_bin.get_static_pad("sink")
-            pad.unlink(sink_pad)
-            self.tee.release_request_pad(pad)
-            
-            # Send EOS to bin to finalize file
-            self.recording_bin.send_event(Gst.Event.new_eos())
-            
-            # Wait for EOS message on the bus (handled in _on_bus_message? No, that's global)
-            # We can just wait a bit or use a bus watch for the bin. 
-            # For simplicity in this script, we'll wait a short duration then set to NULL.
-            # A better way is to wait for the EOS to propagate to the sink.
-            
-            def finalize_bin():
-                time.sleep(1.0) # Give time for muxer to write index
-                self.recording_bin.set_state(Gst.State.NULL)
-                self.pipeline.remove(self.recording_bin)
-                self.recording_bin = None
-                self.recording_active = False
-                self.current_recording_file = None
-                print("Recording bin removed.")
-                
-            threading.Thread(target=finalize_bin).start()
-            
-            return Gst.PadProbeReturn.DROP
+        # 2. Unlink it and send EOS into the recording bin
+        # 3. Wait until EOS reaches the filesink (qtmux has written everything)
+        # 4. Set the bin to NULL and remove it
+        rec_bin = self.recording_bin
+        tee_pad = self.recording_pad
+        bin_sink_pad = rec_bin.get_static_pad("sink")
+        finalized = self.recording_finalized
+        stopped = threading.Event()
+        self.recording_stopped = stopped
+        eos_sent = threading.Event()
+        eos_lock = threading.Lock()
+
+        def send_eos(unlink):
+            with eos_lock:
+                if eos_sent.is_set():
+                    return
+                eos_sent.set()
+            if unlink:
+                tee_pad.unlink(bin_sink_pad)
+                self.tee.release_request_pad(tee_pad)
+            bin_sink_pad.send_event(Gst.Event.new_eos())
+
+        def pad_probe_cb(pad, info):
+            send_eos(unlink=True)
+            return Gst.PadProbeReturn.REMOVE
+
+        def finalize_bin():
+            # If no buffers flow (camera stalled) the blocking probe never
+            # fires; send EOS anyway so the file still gets finalized.
+            if not eos_sent.wait(RECORDING_BLOCK_TIMEOUT_S):
+                print("Recording: tee pad never blocked, sending EOS directly")
+                tee_pad.remove_probe(probe_id)
+                send_eos(unlink=False)
+            if not finalized.wait(RECORDING_FINALIZE_TIMEOUT_S):
+                print(f"Recording: EOS did not reach filesink within "
+                      f"{RECORDING_FINALIZE_TIMEOUT_S}s, file may be truncated")
+            rec_bin.set_state(Gst.State.NULL)
+            if tee_pad.is_linked():
+                tee_pad.unlink(bin_sink_pad)
+                self.tee.release_request_pad(tee_pad)
+            self.pipeline.remove(rec_bin)
+            self.recording_bin = None
+            self.recording_active = False
+            self.current_recording_file = None
+            print(f"Recording finalized: {filename}")
+            stopped.set()
 
         # Add blocking probe to stop data flow
-        self.recording_pad.add_probe(Gst.PadProbeType.BLOCK_DOWNSTREAM, pad_probe_cb, None)
-        
+        probe_id = tee_pad.add_probe(Gst.PadProbeType.BLOCK_DOWNSTREAM, pad_probe_cb)
+        threading.Thread(target=finalize_bin, daemon=True).start()
+
         return {"success": True, "file": filename}
+
+    def wait_recording_stopped(self, timeout):
+        """Block until a stop started by stop_recording() has finalized the file."""
+        stopped = self.recording_stopped
+        if stopped is None:
+            return True
+        return stopped.wait(timeout)
 
     def get_status(self):
         return {
@@ -307,7 +366,12 @@ class JetsonCameraManager:
 
     def close(self):
         if self.recording_active:
+            # Finalize the file before the pipeline goes to NULL, otherwise
+            # the EOS never reaches qtmux (service stop / reboot).
             self.stop_recording()
+            if not self.wait_recording_stopped(
+                    RECORDING_BLOCK_TIMEOUT_S + RECORDING_FINALIZE_TIMEOUT_S + 2):
+                print("Recording: finalize timed out during shutdown")
         if self.pipeline:
             self.pipeline.set_state(Gst.State.NULL)
         if self.loop:
@@ -438,6 +502,15 @@ async def start_recording(request):
 
 async def stop_recording(request):
     result = camera_manager.stop_recording()
+    if result.get("success"):
+        # Answer only once the file is finalized, so "stopped" in the UI means
+        # the file is complete and a new recording can start right away.
+        loop = asyncio.get_running_loop()
+        done = await loop.run_in_executor(
+            None, camera_manager.wait_recording_stopped,
+            RECORDING_BLOCK_TIMEOUT_S + RECORDING_FINALIZE_TIMEOUT_S + 2)
+        if not done:
+            result["message"] = "Stop requested, finalize still in progress"
     return web.json_response(result)
 
 async def storage_info(request):
